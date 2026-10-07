@@ -18,6 +18,7 @@ import org.lwjgl.sdl.SDLVideo;
  */
 public final class SkyClient {
 	private static final boolean SHOW_WINDOW = Boolean.getBoolean("skycraft.showWindow");
+	// private static final boolean SHOW_WINDOW = true;
 	// Started by Skyrim (SkyCraft's bundled instance passes -Dskycraft.startHidden=true): no window and
 	// no title-screen music from the first frame, even while Skyrim is paused (Alt-Tabbed) and the
 	// two haven't linked up yet. Otherwise the window only goes once Skyrim is there.

@@ -1,16 +1,14 @@
 set(TARGET SecurityBreachMinecraftPassthrough)
 
-add_subdirectory(UE4SS_SDK)
-
 add_library(${TARGET} SHARED
     src/dllmain.cpp
+    src/Link.cpp
 )
 
 target_include_directories(${TARGET} PRIVATE
     src
+    UE4SS_SDK/src
+    ${CMAKE_SOURCE_DIR}
 )
 
-target_link_libraries(${TARGET} PUBLIC
-    UE4SS
-    UE4SS_SDK
-)
+target_link_libraries(${TARGET} PUBLIC UE4SS)
