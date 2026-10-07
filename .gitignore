@@ -39,3 +39,6 @@ fabric/run-guest*/
 
 **pycache**/
 *.pyc
+
+# generated UE4SS SDK
+sb/UE4SS_SDK/
