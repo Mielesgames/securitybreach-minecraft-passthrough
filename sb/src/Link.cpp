@@ -75,6 +75,12 @@ bool SecurityBreachLink::create()
         sizeof(skycraft::proto::SkyState)
     );
 
+    std::memset(
+        base_ + skycraft::proto::kOffInputRing,
+        0,
+        skycraft::proto::kInputRingDataOff
+    );
+
     auto* header = reinterpret_cast<skycraft::proto::Header*>(
         base_ + skycraft::proto::kOffHeader
     );
@@ -168,6 +174,71 @@ void SecurityBreachLink::write_sky_state(
     sky_state_seq_ = seq + 2;
 
     heartbeat();
+}
+
+void SecurityBreachLink::push_input(
+    std::uint16_t type,
+    std::uint16_t code,
+    std::int32_t a,
+    std::int32_t b,
+    std::int32_t c
+)
+{
+    if (base_ == nullptr)
+    {
+        return;
+    }
+
+    auto* ring =
+        base_ + skycraft::proto::kOffInputRing;
+
+    auto& head_ref =
+        *reinterpret_cast<std::uint64_t*>(
+            ring + skycraft::proto::kInputRingHeadOff
+        );
+
+    auto& tail_ref =
+        *reinterpret_cast<std::uint64_t*>(
+            ring + skycraft::proto::kInputRingTailOff
+        );
+
+    const auto head =
+        std::atomic_ref<std::uint64_t>(head_ref)
+            .load(std::memory_order_relaxed);
+
+    const auto tail =
+        std::atomic_ref<std::uint64_t>(tail_ref)
+            .load(std::memory_order_acquire);
+
+    if (
+        head - tail >=
+        skycraft::proto::kInputRingEntries
+    )
+    {
+        return;
+    }
+
+    auto* entry =
+        reinterpret_cast<skycraft::proto::InputEvent*>(
+            ring + skycraft::proto::kInputRingDataOff
+        ) + (
+            head &
+            (skycraft::proto::kInputRingEntries - 1)
+        );
+
+    *entry = {
+        type,
+        code,
+        a,
+        b,
+        c
+    };
+
+    std::atomic_ref<std::uint64_t>(head_ref)
+        .store(
+            head + 1,
+            std::memory_order_release
+        );
 }
 
 bool SecurityBreachLink::read_mc_state(skycraft::proto::McState& out) const

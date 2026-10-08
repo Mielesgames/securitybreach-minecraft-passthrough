@@ -32,7 +32,15 @@ public:
         float game_hour
     );
 
-bool read_mc_state(skycraft::proto::McState& out) const;
+    void push_input(
+        std::uint16_t type,
+        std::uint16_t code,
+        std::int32_t a = 0,
+        std::int32_t b = 0,
+        std::int32_t c = 0
+    );
+
+    bool read_mc_state(skycraft::proto::McState& out) const;
 
 private:
     HANDLE mapping_{ nullptr };

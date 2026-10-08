@@ -13,6 +13,7 @@
 
 #include "Link.h"
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -117,14 +118,12 @@ public:
         );
     }
 
-    ~SecurityBreachMinecraftPassthrough() override
+    struct MinecraftKey
     {
-        if (minecraft_job != nullptr)
-        {
-            ::CloseHandle(minecraft_job);
-            minecraft_job = nullptr;
-        }
-    }
+        int virtual_key;
+        std::uint16_t scancode;
+        bool was_down;
+    };
 
     bool gregory_found = false;
     bool minecraft_mode = false;
@@ -133,6 +132,88 @@ public:
     HANDLE minecraft_job = nullptr;
     std::uint32_t teleport_seq = 1;
     std::uint64_t last_mc_frame = 0;
+
+    std::array<MinecraftKey, 8> minecraft_keys{
+        MinecraftKey{ 'W', 26, false },
+        MinecraftKey{ 'A', 4, false },
+        MinecraftKey{ 'S', 22, false },
+        MinecraftKey{ 'D', 7, false },
+        MinecraftKey{ VK_SPACE, 44, false },
+        MinecraftKey{ VK_LSHIFT, 225, false },
+        MinecraftKey{ VK_LCONTROL, 224, false },
+        MinecraftKey{ 'E', 8, false }
+    };
+
+    auto sync_minecraft_keyboard() -> void
+    {
+        if (!minecraft_mode)
+        {
+            for (auto& key : minecraft_keys)
+            {
+                if (key.was_down)
+                {
+                    g_link.push_input(
+                        skycraft::proto::kInKey,
+                        key.scancode,
+                        0
+                    );
+
+                    RC::Output::send<RC::LogLevel::Verbose>(
+                        STR(
+                            "SBMP input: scancode={}, state=UP\n"
+                        ),
+                        key.scancode
+                    );
+
+                    key.was_down = false;
+                }
+            }
+
+            g_link.push_input(
+                skycraft::proto::kInReleaseAll,
+                0
+            );
+
+            return;
+        }
+
+        for (auto& key : minecraft_keys)
+        {
+            const bool down =
+                (::GetAsyncKeyState(key.virtual_key) & 0x8000) != 0;
+
+            if (down == key.was_down)
+            {
+                continue;
+            }
+
+            g_link.push_input(
+                skycraft::proto::kInKey,
+                key.scancode,
+                down ? 1 : 0
+            );
+
+            RC::Output::send<RC::LogLevel::Verbose>(
+                STR(
+                    "SBMP input: VK={}, scancode={}, state={}\n"
+                ),
+                key.virtual_key,
+                key.scancode,
+                down ? STR("DOWN") : STR("UP")
+            );
+
+            key.was_down = down;
+        }
+    }
+
+    ~SecurityBreachMinecraftPassthrough() override
+    {
+        if (minecraft_job != nullptr)
+        {
+            ::CloseHandle(minecraft_job);
+            minecraft_job = nullptr;
+        }
+    }
 
     auto start_minecraft() -> void
     {
@@ -304,6 +385,7 @@ public:
         }
 
         f6_was_down = f6_down;
+        sync_minecraft_keyboard();
 
         std::vector<RC::Unreal::UObject*> controllers;
 
