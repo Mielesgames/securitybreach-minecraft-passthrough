@@ -23,6 +23,18 @@ public final class SkyClient {
 	// no title-screen music from the first frame, even while Skyrim is paused (Alt-Tabbed) and the
 	// two haven't linked up yet. Otherwise the window only goes once Skyrim is there.
 	private static final boolean START_HIDDEN = Boolean.getBoolean("skycraft.startHidden");
+	// Passthrough mode: the other game (Security Breach) sends no collision data, so there is nothing
+	// to wait for and no ground to stand on. Minecraft decides X/Z, the other game decides height.
+	// Enabled with -Dskycraft.passthrough=true or the environment variable SKYCRAFT_PASSTHROUGH=1
+	// (the Security Breach mod sets that one when it starts Minecraft).
+	private static final boolean PASSTHROUGH = Boolean.getBoolean("skycraft.passthrough")
+		|| "1".equals(System.getenv("SKYCRAFT_PASSTHROUGH"));
+
+	static {
+		if (PASSTHROUGH) {
+			SkyCraft.LOG.info("SkyCraft: passthrough mode (no Skyrim collision; height comes from the host game)");
+		}
+	}
 	private static boolean startedHidden;
 
 	private static final SkyLink.SkyState sky = new SkyLink.SkyState();
@@ -189,6 +201,7 @@ public final class SkyClient {
 		SkyDigClient.tick(minecraft);
 		freezeWhileUnlinked(minecraft);
 		holdUntilReady(minecraft);
+		passthroughPhysics(minecraft);
 		publishTick(minecraft);
 	}
 
@@ -260,6 +273,12 @@ public final class SkyClient {
 		if (!linked || player == null) {
 			return;
 		}
+		if (PASSTHROUGH) {
+			// Nothing to wait for: no collision data will ever arrive.
+			holdPos = null;
+			holdSince = 0;
+			return;
+		}
 		if (!sky.inGame() || sky.loading()) {
 			// Skyrim is on its main menu or a loading screen: park the player where they are.
 			if (holdPos == null) {
@@ -296,6 +315,27 @@ public final class SkyClient {
 		player.xo = holdPos.x;
 		player.yo = holdPos.y;
 		player.zo = holdPos.z;
+		player.resetFallDistance();
+	}
+
+	/**
+	 * Passthrough mode: there is no ground in Minecraft, so keep the player at the host game's
+	 * height every tick (X and Z stay Minecraft's: that is the walking). Standing "on the ground"
+	 * each tick makes Minecraft use its normal ground friction and acceleration.
+	 */
+	private static void passthroughPhysics(Minecraft minecraft) {
+		LocalPlayer player = minecraft.player;
+		if (!PASSTHROUGH || !linked || player == null || !sky.inGame() || sky.loading()) {
+			return;
+		}
+		if (teleportPending) {
+			return; // wait until the teleport to the host player's position has been applied
+		}
+		player.setPos(player.getX(), sky.y, player.getZ());
+		player.yo = sky.y;
+		Vec3 motion = player.getDeltaMovement();
+		player.setDeltaMovement(motion.x, 0.0, motion.z);
+		player.setOnGround(true);
 		player.resetFallDistance();
 	}
 

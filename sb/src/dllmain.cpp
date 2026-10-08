@@ -3,6 +3,7 @@
 
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/UObject.hpp>
+#include <Unreal/UFunction.hpp>
 #include <Unreal/AActor.hpp>
 
 #include <UE4SS_SDK/Script/CoreUObject/Rotator.hpp>
@@ -14,10 +15,28 @@
 #include "Link.h"
 
 #include <array>
+#include <exception>
+#include <cmath>
 #include <cstdint>
+#include <iterator>
+#include <string>
 #include <vector>
 
 static SecurityBreachLink g_link;
+
+// Sign of Unreal Y when converting to Minecraft Z.
+//  +1.0: geometrically correct (Unreal is left-handed, Minecraft right-handed),
+//        no mirror image. This is what you want when Minecraft blocks get
+//        drawn inside Security Breach later.
+//  -1.0: the original SkyCraft (Skyrim) convention. Gives a mirror image here.
+// Yaw below is derived from this sign so position and direction always agree.
+static constexpr double kZSign = 1.0;
+
+// Sweep Gregory against Unreal geometry (walls, props) when Minecraft moves him.
+// Off until walking itself is proven: with sweeping on, the engine writes a full
+// FHitResult, and a sweep that starts inside the floor is refused (Gregory then
+// barely moves).
+static constexpr bool kSweepWalls = false;
 
 static double sb_to_mc_x(double x)
 {
@@ -31,12 +50,14 @@ static double sb_to_mc_y(double z)
 
 static double sb_to_mc_z(double y)
 {
-    return -y / skycraft::proto::kUnitsPerBlock;
+    return kZSign * y / skycraft::proto::kUnitsPerBlock;
 }
 
 static float sb_to_mc_yaw(float yaw)
 {
-    float result = 90.0f - yaw;
+    // UE yaw 0 = +X = Minecraft east (-90). Turning right in Unreal (+yaw)
+    // goes towards +Y, which maps to Minecraft Z with sign kZSign.
+    float result = static_cast<float>(kZSign) * yaw - 90.0f;
 
     while (result > 180.0f)
     {
@@ -80,7 +101,7 @@ static double mc_to_sb_y(double y)
 
 static double mc_to_sb_z(double z)
 {
-    return -z * skycraft::proto::kUnitsPerBlock;
+    return kZSign * z * skycraft::proto::kUnitsPerBlock;
 }
 
 class SecurityBreachMinecraftPassthrough : public RC::CppUserModBase
@@ -132,6 +153,41 @@ public:
     HANDLE minecraft_job = nullptr;
     std::uint32_t teleport_seq = 1;
     std::uint64_t last_mc_frame = 0;
+    RC::Unreal::UObject* move_input_controller = nullptr;
+    bool move_input_ignored = false;
+    int resync_cooldown = 0;
+
+    // Stops the game's own WASD from moving Gregory while Minecraft drives
+    // him. Otherwise Gregory gets moved twice (game input + Minecraft).
+    auto set_ignore_move_input(RC::Unreal::UObject* controller, bool ignore) -> void
+    {
+        auto* function =
+            RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UFunction*>(
+                nullptr,
+                nullptr,
+                STR("/Script/Engine.Controller:SetIgnoreMoveInput")
+            );
+
+        if (function == nullptr)
+        {
+            RC::Output::send<RC::LogLevel::Error>(
+                STR("SBMP could not find Controller:SetIgnoreMoveInput\n")
+            );
+            return;
+        }
+
+        struct
+        {
+            bool bNewMoveInput;
+        } params{ ignore };
+
+        controller->ProcessEvent(function, &params);
+
+        RC::Output::send<RC::LogLevel::Default>(
+            STR("SBMP game move input ignored: {}\n"),
+            ignore ? STR("YES") : STR("NO")
+        );
+    }
 
     std::array<MinecraftKey, 8> minecraft_keys{
         MinecraftKey{ 'W', 26, false },
@@ -148,10 +204,13 @@ public:
     {
         if (!minecraft_mode)
         {
+            bool any_released = false;
+
             for (auto& key : minecraft_keys)
             {
                 if (key.was_down)
                 {
+                    any_released = true;
                     g_link.push_input(
                         skycraft::proto::kInKey,
                         key.scancode,
@@ -169,10 +228,15 @@ public:
                 }
             }
 
-            g_link.push_input(
-                skycraft::proto::kInReleaseAll,
-                0
-            );
+            // Only once, when keys were actually down. Pushing this every
+            // frame fills the input ring and later key events get dropped.
+            if (any_released)
+            {
+                g_link.push_input(
+                    skycraft::proto::kInReleaseAll,
+                    0
+                );
+            }
 
             return;
         }
@@ -267,10 +331,31 @@ public:
             }
         }
 
-        wchar_t command_line[] =
-            L"\"C:\\Windows\\System32\\cmd.exe\" /C call "
-            L"\"D:\\Github\\miside-minecraft-passthrough\\fabric\\gradlew.bat\" "
-            L"runClient";
+        // Set the environment variable SBMP_FABRIC_DIR to the fabric folder,
+        // so renaming the repo folder doesn't break this.
+        std::wstring fabric_dir =
+            L"D:\\Github\\miside-minecraft-passthrough\\fabric";
+
+        // Tells the Minecraft side there is no Skyrim collision feed.
+        ::SetEnvironmentVariableW(L"SKYCRAFT_PASSTHROUGH", L"1");
+
+        wchar_t env_buffer[MAX_PATH * 2]{};
+
+        const DWORD env_len = ::GetEnvironmentVariableW(
+            L"SBMP_FABRIC_DIR",
+            env_buffer,
+            static_cast<DWORD>(std::size(env_buffer))
+        );
+
+        if (env_len > 0 && env_len < std::size(env_buffer))
+        {
+            fabric_dir.assign(env_buffer, env_len);
+        }
+
+        std::wstring command_line =
+            L"\"C:\\Windows\\System32\\cmd.exe\" /C call \"" +
+            fabric_dir +
+            L"\\gradlew.bat\" runClient";
 
         STARTUPINFOW startup_info{};
         startup_info.cb = sizeof(startup_info);
@@ -279,13 +364,13 @@ public:
 
         const BOOL started = ::CreateProcessW(
             L"C:\\Windows\\System32\\cmd.exe",
-            command_line,
+            command_line.data(),
             nullptr,
             nullptr,
             FALSE,
             CREATE_NO_WINDOW | CREATE_SUSPENDED,
             nullptr,
-            L"D:\\Github\\miside-minecraft-passthrough\\fabric",
+            fabric_dir.c_str(),
             &startup_info,
             &process_info
         );
@@ -341,6 +426,44 @@ public:
 
     auto on_update() -> void override
     {
+        try
+        {
+            update_impl();
+        }
+        catch (const std::exception& e)
+        {
+            static int errors = 0;
+
+            if (errors++ < 10)
+            {
+                const std::string what = e.what();
+                const std::wstring what_w(what.begin(), what.end());
+
+                RC::Output::send<RC::LogLevel::Error>(
+                    STR("SBMP exception in on_update: {}\n"),
+                    what_w
+                );
+            }
+        }
+        catch (...)
+        {
+            static int errors = 0;
+
+            if (errors++ < 10)
+            {
+                RC::Output::send<RC::LogLevel::Error>(
+                    STR("SBMP unknown exception in on_update\n")
+                );
+            }
+        }
+    }
+
+    // Failsafe state: if Minecraft stops rendering frames, give control back.
+    std::uint64_t watch_frame = 0;
+    ULONGLONG watch_tick = 0;
+
+    auto update_impl() -> void
+    {
         static bool update_logged = false;
 
         if (!update_logged)
@@ -385,6 +508,41 @@ public:
         }
 
         f6_was_down = f6_down;
+
+        // Emergency off.
+        if (minecraft_mode && (::GetAsyncKeyState(VK_F7) & 0x8000) != 0)
+        {
+            minecraft_mode = false;
+
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP Minecraft mode: OFF (F7)\n")
+            );
+        }
+
+        // Watchdog: Minecraft that doesn't produce frames can't drive Gregory.
+        {
+            skycraft::proto::McState watch{};
+
+            if (g_link.read_mc_state(watch))
+            {
+                const ULONGLONG now = ::GetTickCount64();
+
+                if (watch.frameCounter != watch_frame)
+                {
+                    watch_frame = watch.frameCounter;
+                    watch_tick = now;
+                }
+                else if (minecraft_mode && now - watch_tick > 3000)
+                {
+                    minecraft_mode = false;
+
+                    RC::Output::send<RC::LogLevel::Default>(
+                        STR("SBMP Minecraft stopped responding, mode OFF\n")
+                    );
+                }
+            }
+        }
+
         sync_minecraft_keyboard();
 
         std::vector<RC::Unreal::UObject*> controllers;
@@ -422,6 +580,13 @@ public:
                 STR("SBMP MainGamePC_C: {}\n"),
                 controller->GetFullName()
             );
+        }
+
+        if (controller != move_input_controller || move_input_ignored != minecraft_mode)
+        {
+            move_input_controller = controller;
+            move_input_ignored = minecraft_mode;
+            set_ignore_move_input(controller, minecraft_mode);
         }
 
         const std::uintptr_t controller_address =
@@ -555,20 +720,74 @@ public:
                 const double sb_y = mc_to_sb_y(mc_state.y);
                 const double sb_z = mc_to_sb_z(mc_state.z);
 
+                // Don't yank Gregory to a Minecraft position that is far away.
+                // That happens right after F6 (Minecraft hasn't processed the
+                // teleport yet) or when Minecraft's player is frozen/stuck.
+                const double gap_x = sb_x - location.X();
+                const double gap_y = sb_z - location.Y();
+
+                if (gap_x * gap_x + gap_y * gap_y > 350.0 * 350.0)
+                {
+                    if (resync_cooldown > 0)
+                    {
+                        --resync_cooldown;
+                    }
+                    else
+                    {
+                        ++teleport_seq;
+                        resync_cooldown = 60;
+
+                        RC::Output::send<RC::LogLevel::Default>(
+                            STR("SBMP Minecraft is {} units away from Gregory, asking for teleport (seq {})\n"),
+                            std::sqrt(gap_x * gap_x + gap_y * gap_y),
+                            teleport_seq
+                        );
+                    }
+                }
+                else
+                {
+                // Minecraft only decides horizontal movement (X/Y in Unreal).
+                // Height (Z) stays Unreal's, so Gregory keeps standing on the
+                // real floor. sb_y (Minecraft height) is deliberately unused.
+                (void)sb_y;
+
                 RC::Unreal::FVector new_location{
                     static_cast<float>(sb_x),
                     static_cast<float>(sb_z),
-                    static_cast<float>(sb_y)
+                    location.Z()
                 };
 
-                RC::Unreal::FHitResult sweep_hit{};
+                // The engine writes a whole FHitResult when sweeping. Give it a big
+                // zeroed buffer so it can never write past a smaller local struct.
+                alignas(16) std::uint8_t hit_storage[1024]{};
+                auto& sweep_hit =
+                    *reinterpret_cast<RC::Unreal::FHitResult*>(hit_storage);
 
                 actor->K2_SetActorLocation(
                     new_location,
-                    false,
+                    kSweepWalls,
                     sweep_hit,
-                    true
+                    !kSweepWalls
                 );
+
+                // If Gregory didn't reach the target he hit something.
+                // Snap Minecraft back to him, otherwise Minecraft keeps
+                // walking through the wall and the two drift apart.
+                const auto after = actor->K2_GetActorLocation();
+                const double dx = after.X() - new_location.X();
+                const double dy = after.Y() - new_location.Y();
+
+                if (resync_cooldown > 0)
+                {
+                    --resync_cooldown;
+                }
+
+                if (kSweepWalls && dx * dx + dy * dy > 25.0 && resync_cooldown == 0)
+                {
+                    ++teleport_seq;
+                    resync_cooldown = 10;
+                }
+                }
 
                 // float sb_yaw = 90.0f - mc_state.yaw;
                 // float sb_pitch = -mc_state.pitch;
