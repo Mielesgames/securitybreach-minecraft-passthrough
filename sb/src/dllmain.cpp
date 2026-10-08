@@ -7,6 +7,10 @@
 
 #include <UE4SS_SDK/Script/CoreUObject/Rotator.hpp>
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include "Link.h"
 
 #include <cstdint>
@@ -115,12 +119,20 @@ public:
 
     ~SecurityBreachMinecraftPassthrough() override
     {
+        if (minecraft_job != nullptr)
+        {
+            ::CloseHandle(minecraft_job);
+            minecraft_job = nullptr;
+        }
     }
 
     bool gregory_found = false;
     bool minecraft_mode = false;
     bool minecraft_launch_started = false;
+    bool f6_was_down = false;
+    HANDLE minecraft_job = nullptr;
     std::uint32_t teleport_seq = 1;
+    std::uint64_t last_mc_frame = 0;
 
     auto start_minecraft() -> void
     {
@@ -129,7 +141,50 @@ public:
             return;
         }
 
-        minecraft_launch_started = true;
+        if (minecraft_job == nullptr)
+        {
+            minecraft_job = ::CreateJobObjectW(
+                nullptr,
+                nullptr
+            );
+
+            if (minecraft_job == nullptr)
+            {
+                RC::Output::send<RC::LogLevel::Error>(
+                    STR(
+                        "SBMP failed to create Minecraft job. Windows error: {}\n"
+                    ),
+                    ::GetLastError()
+                );
+
+                return;
+            }
+
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION job_info{};
+
+            job_info.BasicLimitInformation.LimitFlags =
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+            if (!::SetInformationJobObject(
+                minecraft_job,
+                JobObjectExtendedLimitInformation,
+                &job_info,
+                sizeof(job_info)
+            ))
+            {
+                RC::Output::send<RC::LogLevel::Error>(
+                    STR(
+                        "SBMP failed to configure Minecraft job. Windows error: {}\n"
+                    ),
+                    ::GetLastError()
+                );
+
+                ::CloseHandle(minecraft_job);
+                minecraft_job = nullptr;
+
+                return;
+            }
+        }
 
         wchar_t command_line[] =
             L"\"C:\\Windows\\System32\\cmd.exe\" /C call "
@@ -147,7 +202,7 @@ public:
             nullptr,
             nullptr,
             FALSE,
-            CREATE_NO_WINDOW,
+            CREATE_NO_WINDOW | CREATE_SUSPENDED,
             nullptr,
             L"D:\\Github\\miside-minecraft-passthrough\\fabric",
             &startup_info,
@@ -156,8 +211,6 @@ public:
 
         if (!started)
         {
-            minecraft_launch_started = false;
-
             RC::Output::send<RC::LogLevel::Error>(
                 STR(
                     "SBMP failed to start Minecraft. Windows error: {}\n"
@@ -167,6 +220,35 @@ public:
 
             return;
         }
+
+        if (!::AssignProcessToJobObject(
+            minecraft_job,
+            process_info.hProcess
+        ))
+        {
+            const DWORD error = ::GetLastError();
+
+            RC::Output::send<RC::LogLevel::Error>(
+                STR(
+                    "SBMP failed to assign Minecraft to job. Windows error: {}\n"
+                ),
+                error
+            );
+
+            ::TerminateProcess(
+                process_info.hProcess,
+                1
+            );
+
+            ::CloseHandle(process_info.hThread);
+            ::CloseHandle(process_info.hProcess);
+
+            return;
+        }
+
+        minecraft_launch_started = true;
+
+        ::ResumeThread(process_info.hThread);
 
         ::CloseHandle(process_info.hThread);
         ::CloseHandle(process_info.hProcess);
@@ -200,6 +282,28 @@ public:
         }
 
         start_minecraft();
+
+        const bool f6_down =
+            (::GetAsyncKeyState(VK_F6) & 0x8000) != 0;
+
+        if (f6_down && !f6_was_down)
+        {
+            minecraft_mode = !minecraft_mode;
+
+            if (minecraft_mode)
+            {
+                ++teleport_seq;
+            }
+
+            RC::Output::send<RC::LogLevel::Verbose>(
+                STR(
+                    "SBMP Minecraft mode: {}\n"
+                ),
+                minecraft_mode ? STR("ON") : STR("OFF")
+            );
+        }
+
+        f6_was_down = f6_down;
 
         std::vector<RC::Unreal::UObject*> controllers;
 
@@ -359,9 +463,12 @@ public:
         {
             if (
                 minecraft_mode &&
-                (mc_state.flags & skycraft::proto::kMcInWorld) != 0
+                (mc_state.flags & skycraft::proto::kMcInWorld) != 0 &&
+                mc_state.frameCounter != last_mc_frame
             )
             {
+                last_mc_frame = mc_state.frameCounter;
+
                 const double sb_x = mc_to_sb_x(mc_state.x);
                 const double sb_y = mc_to_sb_y(mc_state.y);
                 const double sb_z = mc_to_sb_z(mc_state.z);
@@ -380,6 +487,32 @@ public:
                     sweep_hit,
                     true
                 );
+
+                // float sb_yaw = 90.0f - mc_state.yaw;
+                // float sb_pitch = -mc_state.pitch;
+
+                // while (sb_yaw > 180.0f)
+                // {
+                //     sb_yaw -= 360.0f;
+                // }
+
+                // while (sb_yaw < -180.0f)
+                // {
+                //     sb_yaw += 360.0f;
+                // }
+
+                // while (sb_pitch > 180.0f)
+                // {
+                //     sb_pitch -= 360.0f;
+                // }
+
+                // while (sb_pitch < -180.0f)
+                // {
+                //     sb_pitch += 360.0f;
+                // }
+
+                // control_rotation->Yaw = sb_yaw;
+                // control_rotation->Pitch = sb_pitch;
             }
 
             if (mc_log_counter++ % 60 == 0)
