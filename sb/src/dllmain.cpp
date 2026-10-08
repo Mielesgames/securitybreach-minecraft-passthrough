@@ -88,6 +88,26 @@ public:
         ModDescription = STR("Minecraft passthrough for FNAF: Security Breach");
         ModAuthors = STR("Mielesgames");
 
+        // register_keydown_event(
+        //     RC::Input::Key::F6,
+        //     [this]()
+        //     {
+        //         minecraft_mode = !minecraft_mode;
+
+        //         if (minecraft_mode)
+        //         {
+        //             ++teleport_seq;
+        //         }
+
+        //         RC::Output::send<RC::LogLevel::Verbose>(
+        //             STR(
+        //                 "SBMP Minecraft mode: {}\n"
+        //             ),
+        //             minecraft_mode ? STR("ON") : STR("OFF")
+        //         );
+        //     }
+        // );
+
         RC::Output::send<RC::LogLevel::Verbose>(
             STR("SecurityBreachMinecraftPassthrough loaded!\n")
         );
@@ -98,6 +118,63 @@ public:
     }
 
     bool gregory_found = false;
+    bool minecraft_mode = false;
+    bool minecraft_launch_started = false;
+    std::uint32_t teleport_seq = 1;
+
+    auto start_minecraft() -> void
+    {
+        if (minecraft_launch_started)
+        {
+            return;
+        }
+
+        minecraft_launch_started = true;
+
+        wchar_t command_line[] =
+            L"\"C:\\Windows\\System32\\cmd.exe\" /C call "
+            L"\"D:\\Github\\miside-minecraft-passthrough\\fabric\\gradlew.bat\" "
+            L"runClient";
+
+        STARTUPINFOW startup_info{};
+        startup_info.cb = sizeof(startup_info);
+
+        PROCESS_INFORMATION process_info{};
+
+        const BOOL started = ::CreateProcessW(
+            L"C:\\Windows\\System32\\cmd.exe",
+            command_line,
+            nullptr,
+            nullptr,
+            FALSE,
+            CREATE_NO_WINDOW,
+            nullptr,
+            L"D:\\Github\\miside-minecraft-passthrough\\fabric",
+            &startup_info,
+            &process_info
+        );
+
+        if (!started)
+        {
+            minecraft_launch_started = false;
+
+            RC::Output::send<RC::LogLevel::Error>(
+                STR(
+                    "SBMP failed to start Minecraft. Windows error: {}\n"
+                ),
+                ::GetLastError()
+            );
+
+            return;
+        }
+
+        ::CloseHandle(process_info.hThread);
+        ::CloseHandle(process_info.hProcess);
+
+        RC::Output::send<RC::LogLevel::Verbose>(
+            STR("SBMP started Minecraft automatically.\n")
+        );
+    }
 
     auto on_update() -> void override
     {
@@ -116,6 +193,13 @@ public:
         {
             return;
         }
+
+        if (!g_link.valid())
+        {
+            return;
+        }
+
+        start_minecraft();
 
         std::vector<RC::Unreal::UObject*> controllers;
 
@@ -261,7 +345,7 @@ public:
             mc_z,
             mc_yaw,
             mc_pitch,
-            1,
+            teleport_seq,
             1920,
             1080,
             12.0f
@@ -273,7 +357,10 @@ public:
 
         if (g_link.read_mc_state(mc_state))
         {
-            if ((mc_state.flags & skycraft::proto::kMcInWorld) != 0)
+            if (
+                minecraft_mode &&
+                (mc_state.flags & skycraft::proto::kMcInWorld) != 0
+            )
             {
                 const double sb_x = mc_to_sb_x(mc_state.x);
                 const double sb_y = mc_to_sb_y(mc_state.y);
