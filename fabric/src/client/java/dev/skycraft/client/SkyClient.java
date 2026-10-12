@@ -37,6 +37,11 @@ public final class SkyClient {
 	}
 	private static boolean startedHidden;
 
+	/** Linked to a host game that sends its geometry as quarter-block cells (Security Breach). */
+	public static boolean passthrough() {
+		return PASSTHROUGH;
+	}
+
 	private static final SkyLink.SkyState sky = new SkyLink.SkyState();
 	private static final SkyLink.McState mc = new SkyLink.McState();
 	private static volatile boolean linked;
@@ -48,6 +53,9 @@ public final class SkyClient {
 	private static int lastTeleportSeq = -1;
 	private static int teleportAck;
 	private static boolean teleportPending;
+	// Passthrough mode: where the player is parked while there is no host player to follow.
+	private static Vec3 passthroughHold;
+	private static int nightCheck;
 	private static LocalPlayer lastPlayer;
 	private static Vec3 holdPos;
 	private static Vec3 unlinkedHold;
@@ -273,8 +281,8 @@ public final class SkyClient {
 		if (!linked || player == null) {
 			return;
 		}
-		if (PASSTHROUGH) {
-			// Nothing to wait for: no collision data will ever arrive.
+		if (PASSTHROUGH && sky.hostDrives()) {
+			// The host game walks its own player on its own ground: nothing to wait for.
 			holdPos = null;
 			holdSince = 0;
 			return;
@@ -319,22 +327,51 @@ public final class SkyClient {
 	}
 
 	/**
-	 * Passthrough mode: there is no ground in Minecraft, so keep the player at the host game's
-	 * height every tick (X and Z stay Minecraft's: that is the walking). Standing "on the ground"
-	 * each tick makes Minecraft use its normal ground friction and acceleration.
+	 * Passthrough mode (Security Breach). While the host game drives, its player walks on its own
+	 * ground with its own physics and ours is pinned to it. While Minecraft drives, the host sends
+	 * its collision and everything is Minecraft's normal physics: nothing to do here.
 	 */
 	private static void passthroughPhysics(Minecraft minecraft) {
 		LocalPlayer player = minecraft.player;
-		if (!PASSTHROUGH || !linked || player == null || !sky.inGame() || sky.loading()) {
+		if (!PASSTHROUGH || !linked || player == null) {
 			return;
 		}
-		if (teleportPending) {
-			return; // wait until the teleport to the host player's position has been applied
+		// Security Breach plays at night: keep Minecraft's world there too, or zombies and skeletons
+		// burn in a sun nobody can see.
+		if (nightCheck++ % 200 == 0) {
+			var server = minecraft.getSingleplayerServer();
+			if (server != null) {
+				server.execute(() -> server.getCommands().performPrefixedCommand(server.createCommandSourceStack().withSuppressedOutput(), "time set midnight"));
+			}
 		}
-		player.setPos(player.getX(), sky.y, player.getZ());
-		player.yo = sky.y;
-		Vec3 motion = player.getDeltaMovement();
-		player.setDeltaMovement(motion.x, 0.0, motion.z);
+		if (player.isDeadOrDying()) {
+			// Nothing here is meant to kill the player, and the death screen can't be seen: get up again.
+			player.respawn();
+			passthroughHold = null;
+			return;
+		}
+		if (!sky.inGame() || sky.loading()) {
+			// No host player to follow yet (menu, intro, cutscene) and no ground to stand on: stay put,
+			// or the player falls into the void and dies over and over.
+			if (passthroughHold == null) {
+				Vec3 pos = player.position();
+				passthroughHold = new Vec3(pos.x, Math.max(pos.y, 64.0), pos.z);
+			}
+			pin(player, passthroughHold.x, passthroughHold.y, passthroughHold.z);
+			return;
+		}
+		passthroughHold = null;
+		if (sky.hostDrives() && !teleportPending) {
+			pin(player, sky.x, sky.y, sky.z);
+		}
+	}
+
+	private static void pin(LocalPlayer player, double x, double y, double z) {
+		player.setPos(x, y, z);
+		player.xo = x;
+		player.yo = y;
+		player.zo = z;
+		player.setDeltaMovement(Vec3.ZERO);
 		player.setOnGround(true);
 		player.resetFallDistance();
 	}
@@ -396,6 +433,18 @@ public final class SkyClient {
 			}
 			if (player.getAbilities().flying) {
 				flags |= Proto.MC_FLYING;
+			}
+			if (player.isSpectator()) {
+				flags |= Proto.MC_SPECTATOR;
+			}
+			if (player.hasEffect(net.minecraft.world.effect.MobEffects.NIGHT_VISION)) {
+				flags |= Proto.MC_NIGHT_VISION;
+			}
+			if (player.getAbilities().instabuild) {
+				flags |= Proto.MC_CREATIVE;
+			}
+			if (player.getMainHandItem().is(net.minecraft.tags.ItemTags.SWORDS)) {
+				flags |= Proto.MC_HOLDS_SWORD;
 			}
 			mc.x = feet.x;
 			mc.y = feet.y;

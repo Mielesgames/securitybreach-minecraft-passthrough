@@ -214,6 +214,11 @@ public final class SkyLink {
 		public boolean loading() {
 			return (this.flags & SKY_LOADING) != 0;
 		}
+
+		/** The host game moves its player itself (its own physics); ours only follows. */
+		public boolean hostDrives() {
+			return (this.flags & SKY_HOST_DRIVES) != 0;
+		}
 	}
 
 	/** Seqlock read of SkyState into {@code out}. Returns false if the link is down. */

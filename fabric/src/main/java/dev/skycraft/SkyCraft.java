@@ -19,11 +19,35 @@ public final class SkyCraft implements ModInitializer {
 	public static final Logger LOG = LoggerFactory.getLogger(MOD_ID);
 	private static final String KIT2_TAG = "skycraft_builder_kit";
 
+	private static int hostCommand(net.minecraft.commands.CommandSourceStack source, String name, boolean spawn) {
+		if (!dev.skycraft.link.SkyLink.active()) {
+			source.sendFailure(net.minecraft.network.chat.Component.literal("Not linked to the game."));
+			return 0;
+		}
+		int id = java.util.Arrays.asList(dev.skycraft.link.Proto.HOST_CHARACTERS).indexOf(name) + 1;
+		dev.skycraft.link.SkyLink.pushEvent(dev.skycraft.link.Proto.EV_COMMAND, id, 0, 0, 0, 0, spawn ? 1 : 0);
+		source.sendSuccess(() -> net.minecraft.network.chat.Component.literal(spawn ? "Summoning " + name + "." : name + " is on the way."), false);
+		return 1;
+	}
+
 	@Override
 	public void onInitialize() {
 		SkyCombat.init();
 		dev.skycraft.net.SkyNet.init();
 		dev.skycraft.world.SkyDig.init();
+		// Commands for the host game (Security Breach): "/freddy" or "/tp freddy" brings that
+		// character to the player, "/summon freddy" makes a new one. One per character. They are
+		// extra branches of Minecraft's own /tp and /summon, so the chat completes them.
+		net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
+			for (String name : dev.skycraft.link.Proto.HOST_CHARACTERS) {
+				dispatcher.register(net.minecraft.commands.Commands.literal(name).executes(context -> hostCommand(context.getSource(), name, false)));
+				// "tp" only forwards to "teleport": a branch added there is found by both.
+				dispatcher.register(net.minecraft.commands.Commands.literal("teleport")
+					.then(net.minecraft.commands.Commands.literal(name).executes(context -> hostCommand(context.getSource(), name, false))));
+				dispatcher.register(net.minecraft.commands.Commands.literal("summon")
+					.then(net.minecraft.commands.Commands.literal(name).executes(context -> hostCommand(context.getSource(), name, true))));
+			}
+		});
 		ServerLifecycleEvents.SERVER_STARTED.register(SkyCraft::configureServer);
 		ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
 			giveStarterKit(handler.getPlayer());

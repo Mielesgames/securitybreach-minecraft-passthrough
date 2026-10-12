@@ -280,3 +280,189 @@ bool SecurityBreachLink::read_mc_state(skycraft::proto::McState& out) const
 
     return false;
 }
+
+bool SecurityBreachLink::acquire_overlay_frame()
+{
+    if (base_ == nullptr)
+    {
+        return false;
+    }
+
+    auto* control = reinterpret_cast<skycraft::proto::OverlayCtl*>(
+        base_ + skycraft::proto::kOffOverlayCtl
+    );
+
+    std::atomic_ref<std::uint32_t> state(control->state);
+
+    if ((state.load(std::memory_order_acquire) & skycraft::proto::kOverlayDirty) == 0)
+    {
+        return false;
+    }
+
+    // Hand our old front slot to Minecraft and take the one it just filled.
+    const auto old = state.exchange(overlay_front_, std::memory_order_acq_rel);
+
+    overlay_front_ = old & 3;
+
+    return true;
+}
+
+const skycraft::proto::OverlaySlotHdr* SecurityBreachLink::front_header() const
+{
+    return reinterpret_cast<const skycraft::proto::OverlaySlotHdr*>(
+        base_ +
+        skycraft::proto::kOffOverlaySlotHdr +
+        sizeof(skycraft::proto::OverlaySlotHdr) * overlay_front_
+    );
+}
+
+const std::uint8_t* SecurityBreachLink::front_pixels() const
+{
+    return
+        base_ +
+        skycraft::proto::kOffOverlayPixels +
+        skycraft::proto::kOverlaySlotBytes * overlay_front_;
+}
+
+void SecurityBreachLink::discard_unused_rings()
+{
+    if (base_ == nullptr)
+    {
+        return;
+    }
+
+    const auto skip_to_head = [this](std::uint64_t ring, std::uint64_t head_off, std::uint64_t tail_off)
+    {
+        auto& head = *reinterpret_cast<std::uint64_t*>(base_ + ring + head_off);
+        auto& tail = *reinterpret_cast<std::uint64_t*>(base_ + ring + tail_off);
+
+        std::atomic_ref<std::uint64_t>(tail).store(
+            std::atomic_ref<std::uint64_t>(head).load(std::memory_order_acquire),
+            std::memory_order_release
+        );
+    };
+
+    skip_to_head(
+        skycraft::proto::kOffEventRing,
+        skycraft::proto::kEventRingHeadOff,
+        skycraft::proto::kEventRingTailOff
+    );
+}
+
+bool SecurityBreachLink::write_collision(
+    std::uint32_t type,
+    const void* header,
+    std::size_t header_bytes,
+    const void* body,
+    std::size_t body_bytes
+)
+{
+    if (base_ == nullptr)
+    {
+        return false;
+    }
+
+    namespace proto = skycraft::proto;
+
+    auto* ring = base_ + proto::kOffCollisionRing;
+    auto& head_ref = *reinterpret_cast<std::uint64_t*>(ring + proto::kColRingHeadOff);
+    auto& tail_ref = *reinterpret_cast<std::uint64_t*>(ring + proto::kColRingTailOff);
+    auto* data = ring + proto::kColRingDataOff;
+
+    const std::uint64_t payload = header_bytes + body_bytes;
+    const std::uint64_t message = (sizeof(proto::ColMsgHeader) + payload + 7) & ~std::uint64_t(7);
+
+    auto head = std::atomic_ref<std::uint64_t>(head_ref).load(std::memory_order_relaxed);
+    const auto tail = std::atomic_ref<std::uint64_t>(tail_ref).load(std::memory_order_acquire);
+
+    auto pos = head % proto::kColRingDataBytes;
+
+    // A message never wraps: if it doesn't fit before the end, a pad message
+    // sends the reader back to the start.
+    const std::uint64_t pad = pos + message > proto::kColRingDataBytes ? proto::kColRingDataBytes - pos : 0;
+
+    if (proto::kColRingDataBytes - (head - tail) < message + pad)
+    {
+        return false;
+    }
+
+    if (pad > 0)
+    {
+        const proto::ColMsgHeader skip{ proto::kColPad, 0 };
+
+        std::memcpy(data + pos, &skip, sizeof(skip));
+        head += pad;
+        pos = 0;
+    }
+
+    const proto::ColMsgHeader msg{ type, static_cast<std::uint32_t>(payload) };
+
+    std::memcpy(data + pos, &msg, sizeof(msg));
+
+    if (header_bytes > 0)
+    {
+        std::memcpy(data + pos + sizeof(msg), header, header_bytes);
+    }
+
+    if (body_bytes > 0)
+    {
+        std::memcpy(data + pos + sizeof(msg) + header_bytes, body, body_bytes);
+    }
+
+    std::atomic_ref<std::uint64_t>(head_ref).store(head + message, std::memory_order_release);
+
+    return true;
+}
+
+bool SecurityBreachLink::minecraft_targets_block() const
+{
+    if (base_ == nullptr)
+    {
+        return false;
+    }
+
+    const auto* entities = reinterpret_cast<const skycraft::proto::WorldEntities*>(
+        base_ + skycraft::proto::kOffWorldEntities
+    );
+
+    // A single word that flips with the selection: no need for the seqlock.
+    return entities->hasSelection != 0;
+}
+
+bool SecurityBreachLink::read_event(skycraft::proto::McEvent& out)
+{
+    if (base_ == nullptr)
+    {
+        return false;
+    }
+
+    namespace proto = skycraft::proto;
+
+    auto* ring = base_ + proto::kOffEventRing;
+    auto& head_ref = *reinterpret_cast<std::uint64_t*>(ring + proto::kEventRingHeadOff);
+    auto& tail_ref = *reinterpret_cast<std::uint64_t*>(ring + proto::kEventRingTailOff);
+
+    const auto head = std::atomic_ref<std::uint64_t>(head_ref).load(std::memory_order_acquire);
+    auto tail = std::atomic_ref<std::uint64_t>(tail_ref).load(std::memory_order_relaxed);
+
+    if (tail >= head)
+    {
+        return false;
+    }
+
+    // Minecraft got further ahead than the ring holds: the oldest events are gone.
+    if (head - tail > proto::kEventRingEntries)
+    {
+        tail = head - proto::kEventRingEntries;
+    }
+
+    std::memcpy(
+        &out,
+        ring + proto::kEventRingDataOff + (tail & (proto::kEventRingEntries - 1)) * sizeof(proto::McEvent),
+        sizeof(out)
+    );
+
+    std::atomic_ref<std::uint64_t>(tail_ref).store(tail + 1, std::memory_order_release);
+
+    return true;
+}

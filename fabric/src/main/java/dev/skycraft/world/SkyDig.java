@@ -214,6 +214,11 @@ public final class SkyDig {
 	 * the host's setting that counts (their server does the digging).
 	 */
 	public static volatile boolean destruction = true;
+	/**
+	 * Linked to a host game whose geometry can't be dug or blown up (Security Breach): its floors and
+	 * walls would otherwise count as indestructible buildings and swallow every explosion on them.
+	 */
+	public static final boolean PASSTHROUGH = Boolean.getBoolean("skycraft.passthrough") || "1".equals(System.getenv("SKYCRAFT_PASSTHROUGH"));
 
 	/** Marks a cell dug out of Skyrim's geometry (in that Skyrim world). Returns false if it was already. */
 	public static boolean markDug(ServerLevel level, int world, BlockPos pos) {

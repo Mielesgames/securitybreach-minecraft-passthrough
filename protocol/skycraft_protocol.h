@@ -59,6 +59,7 @@ namespace skycraft::proto
 		kSkyInGame = 1u << 0,    // a save is loaded and the player exists
 		kSkyMenuOpen = 1u << 1,  // a Skyrim menu owns input; MC should drop held keys
 		kSkyLoading = 1u << 2,   // loading screen / cell transition in progress
+		kSkyHostDrives = 1u << 3,  // the host game moves its player itself; Minecraft's player just follows
 	};
 
 	// Skyrim's water (lakes, rivers, the sea) around the player, for Minecraft to treat as its own
@@ -100,6 +101,10 @@ namespace skycraft::proto
 		kMcDead = 1u << 5,
 		kMcSwimming = 1u << 6,
 		kMcFlying = 1u << 7,
+		kMcSpectator = 1u << 8,  // spectator mode: flies through everything
+		kMcNightVision = 1u << 9,  // the night vision effect is active
+		kMcCreative = 1u << 10,    // creative mode: breaks things in one hit
+		kMcHoldsSword = 1u << 11,  // a sword in the main hand: in creative it breaks nothing
 	};
 
 	struct McState
@@ -180,6 +185,9 @@ namespace skycraft::proto
 		kInReleaseAll = 6,   // release every held key/button (input focus left MC)
 		kInHurt = 7,         // Skyrim hit the player: code = HurtKind, a = Skyrim damage * 100, b = attacker FormID, c = HurtFlags
 		kInOpenMenu = 8,     // open Minecraft's pause/options menu
+		kInSwing = 9,        // swing the main hand (the player used something in the host game)
+		kInBreakEffect = 10, // something in the host game broke: block-break particles and sound at
+		                     // a, b, c (Minecraft coordinates x 100), two blocks tall
 	};
 
 	enum HurtKind : std::uint16_t
@@ -247,6 +255,25 @@ namespace skycraft::proto
 		                    // flags = flight pitch (float bits), weapon = arrow texture (0 plain, 1 tipped, 2 spectral)
 		kEvSkillUse = 5,    // the player used a Skyrim skill in Minecraft: formId = Skyrim skill (ActorValue: 9 Block,
 		                    // 10 Smithing, 11 Heavy Armor, 12 Light Armor), a = uses (as Skyrim's AdvanceSkill counts them)
+		kEvCommand = 6,     // a chat command about one of the host game's characters: formId = HostCharacter,
+		                    // flags = 0: bring it to the player, 1: spawn a new one
+	};
+
+	// Who a kEvCommand is about. Matched against the names of the game's character classes.
+	enum HostCharacter : std::uint32_t
+	{
+		kHostFreddy = 1,
+		kHostChica = 2,
+		kHostMonty = 3,
+		kHostRoxy = 4,
+		kHostVanny = 5,
+		kHostVanessa = 6,
+		kHostMoon = 7,
+		kHostSun = 8,
+		kHostBot = 9,
+		kHostEndo = 10,
+		kHostMusicMan = 11,
+		kHostCharacterCount
 	};
 
 	enum HitFlags : std::uint32_t

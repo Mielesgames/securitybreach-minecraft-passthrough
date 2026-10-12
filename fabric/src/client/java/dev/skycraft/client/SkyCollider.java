@@ -23,8 +23,11 @@ public final class SkyCollider {
 		if (tris.isEmpty()) {
 			return move;
 		}
+		// Security Breach's walls arrive rounded up to quarter-block cells, which makes every doorway
+		// up to a quarter block narrower on each side. A slimmer body makes up for it.
+		double radius = SkyClient.passthrough() ? 0.18 : box.getXsize() * 0.5;
 		double[] r = TriCollider.resolve(
-			tris, (box.minX + box.maxX) * 0.5, box.minY, (box.minZ + box.maxZ) * 0.5, box.getXsize() * 0.5, box.getYsize(), step, player.onGround(),
+			tris, (box.minX + box.maxX) * 0.5, box.minY, (box.minZ + box.maxZ) * 0.5, radius, box.getYsize(), step, player.onGround(),
 			move.x, move.y, move.z
 		);
 		if (r[0] == move.x && r[1] == move.y && r[2] == move.z) {

@@ -40,6 +40,8 @@ public final class Proto {
 	// Input types added in v5
 	public static final int IN_HURT = 7;
 	public static final int IN_OPEN_MENU = 8;
+	public static final int IN_SWING = 9;
+	public static final int IN_BREAK_EFFECT = 10;
 	public static final int HURT_MELEE = 0;
 	public static final int HURT_PROJECTILE = 1;
 	public static final int HURT_MAGIC = 2;
@@ -69,6 +71,9 @@ public final class Proto {
 	public static final int EV_EXPLOSION = 3;
 	public static final int EV_ARROW_STUCK = 4;
 	public static final int EV_SKILL_USE = 5;
+	public static final int EV_COMMAND = 6;
+	/** Names for EV_COMMAND's formId (HostCharacter in the header): index + 1. */
+	public static final String[] HOST_CHARACTERS = { "freddy", "chica", "monty", "roxy", "vanny", "vanessa", "moon", "sun", "bot", "endo", "musicman" };
 	// Skyrim skills (ActorValue) Minecraft reports use of; weapon skills come from EV_HIT_ACTOR.
 	public static final int SKILL_BLOCK = 9;
 	public static final int SKILL_SMITHING = 10;
@@ -148,6 +153,7 @@ public final class Proto {
 	public static final int SKY_IN_GAME = 1;
 	public static final int SKY_MENU_OPEN = 1 << 1;
 	public static final int SKY_LOADING = 1 << 2;
+	public static final int SKY_HOST_DRIVES = 1 << 3;
 
 	// McState (relative to OFF_MC_STATE)
 	public static final long MS_SEQ = 0x00;
@@ -189,6 +195,10 @@ public final class Proto {
 	public static final int MC_DEAD = 1 << 5;
 	public static final int MC_SWIMMING = 1 << 6;
 	public static final int MC_FLYING = 1 << 7;
+	public static final int MC_SPECTATOR = 1 << 8;
+	public static final int MC_NIGHT_VISION = 1 << 9;
+	public static final int MC_CREATIVE = 1 << 10;
+	public static final int MC_HOLDS_SWORD = 1 << 11;
 
 	// Overlay
 	public static final long OC_STATE = 0x00;

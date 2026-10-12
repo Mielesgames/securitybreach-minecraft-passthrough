@@ -452,7 +452,8 @@ public final class WorldExporter {
 		}
 		BlockPos pos = blockHit.getBlockPos();
 		if (blockHit instanceof SkyClip.SkyrimHitResult) {
-			if (!(minecraft.player.getMainHandItem().getItem() instanceof BlockItem)) {
+			// Security Breach: only real blocks get an outline, like in Minecraft itself.
+			if (dev.skycraft.world.SkyDig.PASSTHROUGH || !(minecraft.player.getMainHandItem().getItem() instanceof BlockItem)) {
 				return null;
 			}
 			return new float[] { pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1, pos.getY() + 1, pos.getZ() + 1 };

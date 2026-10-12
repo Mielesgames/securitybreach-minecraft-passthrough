@@ -69,6 +69,21 @@ public final class InputBridge {
 					minecraft.gui.setScreen(new PauseScreen(true));
 				}
 			}
+			case Proto.IN_SWING -> {
+				if (minecraft.player != null) {
+					minecraft.player.swing(net.minecraft.world.InteractionHand.MAIN_HAND, minecraft.player.getMainHandItem().getAttackAnimation(), false);
+				}
+			}
+			case Proto.IN_BREAK_EFFECT -> {
+				// Something of the host game's broke (a cardboard cutout): it goes like a block of planks.
+				if (minecraft.level != null) {
+					var pos = net.minecraft.core.BlockPos.containing(a / 100.0, b / 100.0, c / 100.0);
+					var planks = net.minecraft.world.level.block.Blocks.OAK_PLANKS.defaultBlockState();
+					minecraft.level.addDestroyBlockEffect(pos, planks);
+					minecraft.level.addDestroyBlockEffect(pos.above(), planks);
+					minecraft.level.playLocalSound(pos, net.minecraft.sounds.SoundEvents.WOOD_BREAK, net.minecraft.sounds.SoundSource.BLOCKS, 1.0F, 0.8F, false);
+				}
+			}
 			default -> {
 			}
 		}

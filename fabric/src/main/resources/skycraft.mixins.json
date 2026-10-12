@@ -11,6 +11,7 @@
     "EntitySwimMixin",
     "FallingBlockMixin",
     "FlowingFluidMixin",
+    "IronGolemMixin",
     "ItemMixin",
     "MinecraftServerFlightMixin",
     "PlayerEdgeMixin",
@@ -19,7 +20,8 @@
     "ProjectileUtilMixin",
     "ServerExplosionMixin",
     "ServerPlayerMixin",
-    "SmithingMixin"
+    "SmithingMixin",
+    "WalkNodeEvaluatorMixin"
   ],
   "injectors": { "defaultRequire": 1 }
 }
