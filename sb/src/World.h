@@ -4,6 +4,9 @@
 
 #include <d3d11.h>
 
+#include <array>
+#include <vector>
+
 // Draws Minecraft's blocks inside Security Breach's picture. Minecraft sends
 // its block meshes and texture atlas through the render ring; this keeps them
 // on the GPU and draws them from the game's camera.
@@ -32,6 +35,10 @@ namespace world
     // there in third person. Game thread.
     void set_player_position(double x, double y, double z);
 
+    // The leads characters are held on, as lines from one end to the other
+    // (six Unreal coordinates each). Game thread, whenever they change place.
+    void set_ropes(const std::vector<std::array<double, 6>>& ropes);
+
     // Minecraft's night vision effect: brightens the game's picture and
     // lights Minecraft's own things fully. Any thread.
     void set_night_vision(bool on);
@@ -55,6 +62,15 @@ namespace world
     // Is there a Minecraft block here that things collide with? Block
     // coordinates; any thread.
     bool solid_at(int x, int y, int z);
+
+    // What burns here: 0 nothing, else a proto::BlockHazard (fire, lava,
+    // magma). Block coordinates; any thread.
+    int hazard_at(int x, int y, int z);
+
+    // The collision boxes of blocks that aren't full cubes (doors, fences,
+    // slabs) that touch the given box, as {minx, miny, minz, maxx, maxy,
+    // maxz} in blocks, appended to `out`. Any thread.
+    void shapes_in(const double low[3], const double high[3], std::vector<std::array<float, 6>>& out);
 
     // Lets go of the game's device context again.
     void shutdown();

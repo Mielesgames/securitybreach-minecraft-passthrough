@@ -327,6 +327,8 @@ public final class SkyLink {
 		public float bobO, bob;
 		public float tickMs = 50.0F;
 		public int cameraMode;
+		/** Security Breach: the broken-object paper in the main hand (0: none). */
+		public int heldToken;
 		public float cameraDistance;
 	}
 
@@ -347,6 +349,7 @@ public final class SkyLink {
 		s.set(JAVA_FLOAT, b + MS_PITCH, st.pitch);
 		s.set(JAVA_FLOAT, b + MS_EYE_HEIGHT, st.eyeHeight);
 		s.set(JAVA_FLOAT, b + MS_SENSITIVITY, st.sensitivity);
+		s.set(JAVA_INT, b + MS_HELD_TOKEN, st.heldToken);
 		s.set(JAVA_INT, b + MS_TELEPORT_ACK, st.teleportAck);
 		s.set(JAVA_INT, b + MS_GUI_SCALE, st.guiScale);
 		s.set(JAVA_LONG, b + MS_FRAME_COUNTER, st.frameCounter);

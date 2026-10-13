@@ -84,10 +84,165 @@ public final class InputBridge {
 					minecraft.level.playLocalSound(pos, net.minecraft.sounds.SoundEvents.WOOD_BREAK, net.minecraft.sounds.SoundSource.BLOCKS, 1.0F, 0.8F, false);
 				}
 			}
+			case Proto.IN_BUCKET_TOKEN -> {
+				// A Security Breach character was scooped up: the water bucket in hand now holds it.
+				var name = TOKEN_NAMES.remove(code);
+				var server = minecraft.getSingleplayerServer();
+				if (server != null && minecraft.player != null) {
+					String label = name == null || name.isEmpty() ? "Animatronic" : name.toString();
+					var uuid = minecraft.player.getUUID();
+					server.execute(() -> {
+						var player = server.getPlayerList().getPlayer(uuid);
+						if (player == null) {
+							return;
+						}
+						var bucket = dev.skycraft.SkyCraft.tokenBucket(code, label);
+						if (player.getMainHandItem().is(net.minecraft.world.item.Items.WATER_BUCKET) && dev.skycraft.SkyCraft.tokenOf(player.getMainHandItem()) == 0) {
+							player.setItemInHand(net.minecraft.world.InteractionHand.MAIN_HAND, bucket);
+						} else {
+							player.getInventory().add(bucket);
+						}
+					});
+				}
+			}
+			case Proto.IN_LEASH -> {
+				// The player used a lead on a Security Breach character, or took it off.
+				var server = minecraft.getSingleplayerServer();
+				if (server != null && minecraft.player != null) {
+					var uuid = minecraft.player.getUUID();
+					boolean on = code != 0;
+					int formId = a;
+					server.execute(() -> {
+						var player = server.getPlayerList().getPlayer(uuid);
+						if (player != null) {
+							dev.skycraft.combat.SkyCombat.leash(player, formId, on);
+						}
+					});
+				}
+			}
+			case Proto.IN_PICK_TOKEN -> {
+				// Creative pick on a Security Breach thing: its spawn egg or paper, into the hand.
+				var name = TOKEN_NAMES.remove(code);
+				var server = minecraft.getSingleplayerServer();
+				if (server != null && minecraft.player != null) {
+					String label = name == null || name.isEmpty() ? "Object" : name.toString();
+					boolean character = a != 0;
+					var uuid = minecraft.player.getUUID();
+					server.execute(() -> {
+						var player = server.getPlayerList().getPlayer(uuid);
+						if (player == null) {
+							return;
+						}
+						var item = character ? dev.skycraft.SkyCraft.tokenEgg(code, label) : dev.skycraft.SkyCraft.tokenPaper(code, label);
+						if (player.getMainHandItem().isEmpty()) {
+							player.setItemInHand(net.minecraft.world.InteractionHand.MAIN_HAND, item);
+						} else {
+							player.getInventory().add(item);
+						}
+					});
+				}
+			}
+			case Proto.IN_CHAT_TEXT -> {
+				var text = CHAT_LINES.computeIfAbsent(code, k -> new StringBuilder());
+				for (int word : new int[] { a, b, c }) {
+					for (int i = 0; i < 4; i++) {
+						int ch = (word >>> (i * 8)) & 0xFF;
+						if (ch != 0) {
+							text.append((char) ch);
+						}
+					}
+				}
+			}
+			case Proto.IN_CHAT_SAY -> {
+				// Something a Security Breach character said (its subtitle): into the chat.
+				var text = CHAT_LINES.remove(code);
+				if (text != null && !text.isEmpty()) {
+					minecraft.gui.hud.getChat().addClientSystemMessage(net.minecraft.network.chat.Component.literal(text.toString()));
+				}
+			}
+			case Proto.IN_HIDE -> {
+				// The host player is in a hiding spot (or left it): onto the seat, or the seat goes.
+				var server = minecraft.getSingleplayerServer();
+				if (server != null && minecraft.player != null) {
+					var uuid = minecraft.player.getUUID();
+					boolean hide = code != 0;
+					double x = a / 100.0, y = b / 100.0, z = c / 100.0;
+					server.execute(() -> {
+						var player = server.getPlayerList().getPlayer(uuid);
+						if (player != null) {
+							dev.skycraft.combat.HidingSeat.set(player, hide, x, y, z);
+						}
+					});
+				}
+			}
+			case Proto.IN_MOUNT_FREDDY -> {
+				// The player used Freddy in the host game: onto his mule.
+				var server = minecraft.getSingleplayerServer();
+				if (server != null && minecraft.player != null) {
+					var uuid = minecraft.player.getUUID();
+					double x = a / 100.0, y = b / 100.0, z = c / 100.0;
+					server.execute(() -> {
+						var player = server.getPlayerList().getPlayer(uuid);
+						if (player != null) {
+							dev.skycraft.combat.FreddyMount.mount(player, x, y, z);
+						}
+					});
+				}
+			}
+			case Proto.IN_TOKEN_NAME -> {
+				var name = TOKEN_NAMES.computeIfAbsent(code, k -> new StringBuilder());
+				for (int word : new int[] { a, b, c }) {
+					for (int i = 0; i < 4; i++) {
+						int ch = (word >>> (i * 8)) & 0xFF;
+						if (ch != 0) {
+							name.append((char) ch);
+						}
+					}
+				}
+			}
+			case Proto.IN_DROP_TOKEN -> {
+				// A Security Breach object broke: its paper drops where it stood, like a block's drop.
+				var name = TOKEN_NAMES.remove(code);
+				var server = minecraft.getSingleplayerServer();
+				if (server != null && minecraft.player != null) {
+					String label = name == null || name.isEmpty() ? "Object" : name.toString();
+					double x = a / 100.0, y = b / 100.0, z = c / 100.0;
+					var dimension = minecraft.player.level().dimension();
+					server.execute(() -> {
+						var level = server.getLevel(dimension);
+						if (level != null) {
+							var drop = new net.minecraft.world.entity.item.ItemEntity(level, x, y + 0.5, z, dev.skycraft.SkyCraft.tokenPaper(code, label));
+							drop.setDefaultPickUpDelay();
+							level.addFreshEntity(drop);
+						}
+					});
+				}
+			}
+			case Proto.IN_USE_TOKEN -> {
+				// The object was put back: the paper in the hand is used up (not in creative).
+				var server = minecraft.getSingleplayerServer();
+				if (server != null && minecraft.player != null) {
+					var uuid = minecraft.player.getUUID();
+					server.execute(() -> {
+						var player = server.getPlayerList().getPlayer(uuid);
+						if (player != null && !player.getAbilities().instabuild && dev.skycraft.SkyCraft.tokenOf(player.getMainHandItem()) == code) {
+							if (player.getMainHandItem().is(net.minecraft.world.item.Items.WATER_BUCKET)) {
+								// The character is out; the water stays in the bucket.
+								player.setItemInHand(net.minecraft.world.InteractionHand.MAIN_HAND, new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.WATER_BUCKET));
+							} else {
+								player.getMainHandItem().shrink(1);
+							}
+						}
+					});
+				}
+			}
 			default -> {
 			}
 		}
 	}
+
+	private static final java.util.Map<Integer, StringBuilder> TOKEN_NAMES = new java.util.HashMap<>();
+	private static final java.util.Map<Integer, StringBuilder> CHAT_LINES = new java.util.HashMap<>();
 
 	/** Skyrim hit the player: apply it as Minecraft damage on the integrated server (or the host's). */
 	private static void hurt(Minecraft minecraft, int kind, float skyrimDamage, int attacker, int flags) {

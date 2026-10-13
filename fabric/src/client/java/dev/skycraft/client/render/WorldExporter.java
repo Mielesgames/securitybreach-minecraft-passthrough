@@ -69,6 +69,11 @@ public final class WorldExporter {
 	private static final LongOpenHashSet LIT = new LongOpenHashSet(); // sections Skyrim holds lights for
 	private static final LongOpenHashSet SOLID = new LongOpenHashSet(); // sections Skyrim holds NPC collision for
 	private static final long[] SOLID_BITS = new long[64]; // 4096 blocks: bit x + 16z + 256y
+	// Security Breach: blocks that aren't full cubes (doors, fences, slabs) go as their actual boxes,
+	// so an open door lets a character through and a closed one doesn't.
+	private static final LongOpenHashSet SHAPED = new LongOpenHashSet(); // sections the host holds such boxes for
+	private static final int MAX_SHAPES = 4096;
+	private static final ByteBuffer SHAPES = ByteBuffer.allocate(MAX_SHAPES * 12).order(ByteOrder.LITTLE_ENDIAN);
 	private static final LongOpenHashSet DUG = new LongOpenHashSet(); // sections Skyrim holds dug cells for
 	private static final ByteBuffer LIGHTS = ByteBuffer.allocate(16 * 16 * 16 * 8).order(ByteOrder.LITTLE_ENDIAN);
 	private static int sentGeneration = Integer.MIN_VALUE;
@@ -136,6 +141,7 @@ public final class WorldExporter {
 		SENT.clear();
 		LIT.clear();
 		SOLID.clear();
+		SHAPED.clear();
 		DUG.clear();
 		dev.skycraft.client.SkyDigClient.resendAll();
 		// Everything already loaded needs meshing again; later chunk loads mark themselves dirty.
@@ -197,7 +203,7 @@ public final class WorldExporter {
 				dugCount += Long.bitCount(word);
 			}
 		}
-		if (empty && !SENT.contains(key) && !LIT.contains(key) && !SOLID.contains(key) && dugCount == 0 && !DUG.contains(key)) {
+		if (empty && !SENT.contains(key) && !LIT.contains(key) && !SOLID.contains(key) && !SHAPED.contains(key) && dugCount == 0 && !DUG.contains(key)) {
 			return false; // nothing there and nothing to remove
 		}
 		MESH.reset();
@@ -205,6 +211,8 @@ public final class WorldExporter {
 		int lightCount = 0;
 		java.util.Arrays.fill(SOLID_BITS, 0L);
 		int solidCount = 0;
+		SHAPES.clear();
+		int shapeCount = 0;
 		MESH.cardinal = level.cardinalLighting();
 		if (!empty) {
 			BlockPos origin = SectionPos.of(sx, sy, sz).origin();
@@ -218,10 +226,23 @@ public final class WorldExporter {
 							continue;
 						}
 						// Blocks Skyrim's NPCs can't walk through (anything with a collision shape).
-						if (!state.getCollisionShape(level, pos).isEmpty()) {
-							int bit = x + 16 * z + 256 * y;
-							SOLID_BITS[bit >> 6] |= 1L << (bit & 63);
-							solidCount++;
+						var collision = state.getCollisionShape(level, pos);
+						if (!collision.isEmpty()) {
+							if (dev.skycraft.world.SkyDig.PASSTHROUGH && !net.minecraft.world.level.block.Block.isShapeFullBlock(collision)) {
+								for (net.minecraft.world.phys.AABB box : collision.toAabbs()) {
+									if (shapeCount < MAX_SHAPES) {
+										SHAPES.put((byte) x).put((byte) y).put((byte) z).put((byte) 0)
+											.put(sixteenths(box.minX)).put(sixteenths(box.minY)).put(sixteenths(box.minZ))
+											.put(sixteenths(box.maxX)).put(sixteenths(box.maxY)).put(sixteenths(box.maxZ))
+											.put((byte) 0).put((byte) 0);
+										shapeCount++;
+									}
+								}
+							} else {
+								int bit = x + 16 * z + 256 * y;
+								SOLID_BITS[bit >> 6] |= 1L << (bit & 63);
+								solidCount++;
+							}
 						}
 						// Light-emitting blocks (torches, lava, glowstone, ...) light Skyrim's world too.
 						int emission = state.getLightEmission();
@@ -251,7 +272,8 @@ public final class WorldExporter {
 			Minecraft minecraft = Minecraft.getInstance();
 			DigWalls.add(level, sx, sy, sz, dug, digLookup, st -> cubeFaces(minecraft, st), MESH::wall);
 		}
-		if (MESH.vertexCount() == 0 && !SENT.contains(key) && lightCount == 0 && !LIT.contains(key) && solidCount == 0 && !SOLID.contains(key) && dugCount == 0
+		if (MESH.vertexCount() == 0 && !SENT.contains(key) && lightCount == 0 && !LIT.contains(key) && solidCount == 0 && !SOLID.contains(key)
+			&& shapeCount == 0 && !SHAPED.contains(key) && dugCount == 0
 			&& !DUG.contains(key)) {
 			return true;
 		}
@@ -286,6 +308,16 @@ public final class WorldExporter {
 					SOLID.add(key);
 				} else {
 					SOLID.remove(key);
+				}
+			}
+			if (shapeCount > 0 || SHAPED.contains(key)) {
+				ByteBuffer shapeHeader = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN).putInt(sx).putInt(sy).putInt(sz).putInt(shapeCount).flip();
+				if (!SkyLink.writeRender(Proto.REN_SHAPES, shapeHeader, SHAPES.flip())) {
+					markDirty(sx, sy, sz);
+				} else if (shapeCount > 0) {
+					SHAPED.add(key);
+				} else {
+					SHAPED.remove(key);
 				}
 			}
 			// Cells dug out of Skyrim's world: its geometry there goes.
@@ -442,6 +474,10 @@ public final class WorldExporter {
 			return null;
 		}
 		return atlas.rect(material.sprite());
+	}
+
+	private static byte sixteenths(double v) {
+		return (byte) Math.max(0, Math.min(16, Math.round(v * 16.0)));
 	}
 
 	/** Outline for Skyrim to draw: the targeted block, or where a held block would go on Skyrim ground. */

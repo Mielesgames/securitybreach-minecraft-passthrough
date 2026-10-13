@@ -32,5 +32,11 @@ namespace input
     // gets those clicks regardless.
     bool take_attack_click();
 
+    // The left button is down outside a Minecraft screen: Steve keeps hacking.
+    bool attack_held();
+
+    // The middle button is down outside a Minecraft screen (creative: grab).
+    bool grab_held();
+
     void uninstall();
 }

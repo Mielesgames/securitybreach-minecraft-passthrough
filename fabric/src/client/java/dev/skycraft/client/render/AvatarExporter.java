@@ -83,6 +83,8 @@ final class AvatarExporter implements SubmitNodeCollector {
 	private static final int SOLID = 1 | 8 | (7 << 4);
 	private static final int PARTICLE = 1 | 8;
 	private static final int PARTICLE_BLENDED = 2 | 8;
+	/** Like a particle, and untextured (4): the colour alone. */
+	private static final int LEASH = 1 | 4 | 8;
 	// How a batch's raw UVs map into the combined atlas (texture 0).
 	private static final int UV_RAW = 0, UV_BLOCK_ATLAS = 1, UV_ITEM_ATLAS = 2;
 	private static final Direction[] FACES_AND_NONE = { null, Direction.DOWN, Direction.UP, Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST };
@@ -294,7 +296,7 @@ final class AvatarExporter implements SubmitNodeCollector {
 		PoseStack pose = new PoseStack();
 		int entities = 0;
 		for (Entity e : level.entitiesForRendering()) {
-			if (e == player || e instanceof ItemEntity || e instanceof AbstractArrow || e instanceof ItemSupplier || e instanceof SkyrimActorEntity
+			if (e == player || e instanceof ItemEntity || e instanceof AbstractArrow || e instanceof ItemSupplier || e instanceof SkyrimActorEntity || dev.skycraft.combat.FreddyMount.isFreddy(e)
 				|| e.distanceToSqr(cam) > SCENE_RANGE * SCENE_RANGE || entities >= SCENE_MAX_ENTITIES) {
 				continue;
 			}
@@ -844,8 +846,56 @@ final class AvatarExporter implements SubmitNodeCollector {
 	public void submitFlame(PoseStack poseStack, EntityRenderState renderState, Quaternionf rotation) {
 	}
 
+	/**
+	 * A lead: Minecraft's own is a ribbon of 24 pieces in two shades of brown, hanging when slack.
+	 * Here it is two ribbons crossed (one flat, one upright), each with both faces, so it shows from
+	 * every side whatever the host culls.
+	 */
 	@Override
 	public void submitLeash(PoseStack poseStack, EntityRenderState.LeashState leashState) {
+		this.capture.flush();
+		float dx = (float) (leashState.end.x - leashState.start.x);
+		float dy = (float) (leashState.end.y - leashState.start.y);
+		float dz = (float) (leashState.end.z - leashState.start.z);
+		float flat = (float) Math.sqrt(dx * dx + dz * dz);
+		float half = 0.025F;
+		float px = flat > 1.0e-4F ? dz / flat * half : half;
+		float pz = flat > 1.0e-4F ? -dx / flat * half : 0.0F;
+		poseStack.pushPose();
+		poseStack.translate(leashState.offset);
+		PoseStack.Pose pose = poseStack.last();
+		this.capture.begin(this.batch(0, UV_RAW, LEASH));
+		final int pieces = 24;
+		float lx = 0.0F, ly = 0.0F, lz = 0.0F;
+		for (int i = 1; i <= pieces; i++) {
+			float t = i / (float) pieces;
+			float x = dx * t, z = dz * t;
+			float y = leashState.slack ? (dy > 0.0F ? dy * t * t : dy - dy * (1.0F - t) * (1.0F - t)) : dy * t;
+			float shade = i % 2 == 0 ? 1.0F : 0.7F;
+			int r = (int) (0.5F * shade * 255.0F), g = (int) (0.4F * shade * 255.0F), b = (int) (0.3F * shade * 255.0F);
+			int block = Math.round(leashState.startBlockLight + (leashState.endBlockLight - leashState.startBlockLight) * t);
+			int sky = Math.round(leashState.startSkyLight + (leashState.endSkyLight - leashState.startSkyLight) * t);
+			int light = (block << 4) | (sky << 20);
+			// Flat ribbon, then the upright one.
+			this.leashQuad(pose, lx - px, ly, lz - pz, lx + px, ly, lz + pz, x + px, y, z + pz, x - px, y, z - pz, r, g, b, light);
+			this.leashQuad(pose, lx, ly - half, lz, lx, ly + half, lz, x, y + half, z, x, y - half, z, r, g, b, light);
+			lx = x;
+			ly = y;
+			lz = z;
+		}
+		this.capture.flush();
+		poseStack.popPose();
+	}
+
+	private void leashQuad(PoseStack.Pose pose, float ax, float ay, float az, float bx, float by, float bz, float cx, float cy, float cz, float dx, float dy,
+		float dz, int r, int g, int b, int light) {
+		float[][] corners = { { ax, ay, az }, { bx, by, bz }, { cx, cy, cz }, { dx, dy, dz } };
+		for (int face = 0; face < 2; face++) {
+			for (int k = 0; k < 4; k++) {
+				float[] c = corners[face == 0 ? k : 3 - k];
+				this.capture.addVertex(pose, c[0], c[1], c[2]).setColor(r, g, b, 255).setUv(0.0F, 0.0F).setLight(light);
+			}
+		}
 	}
 
 	@Override

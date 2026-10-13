@@ -117,6 +117,11 @@ float4 PSFull() : SV_Target {
         std::mutex g_solids_mutex;
         std::unordered_map<std::uint64_t, std::array<std::uint8_t, 512>> g_solids;
 
+        // Burning blocks per section (same lock): packed x | y << 4 | z << 8 | hazard << 12.
+        std::unordered_map<std::uint64_t, std::vector<std::uint16_t>> g_hazards;
+        // Boxes of the blocks that aren't full cubes, per section (same lock), in blocks.
+        std::unordered_map<std::uint64_t, std::vector<std::array<float, 6>>> g_shapes;
+
         std::mutex g_camera_mutex;
         Camera g_camera;
 
@@ -143,6 +148,7 @@ float4 PSFull() : SV_Target {
         UINT g_avatar_vb_capacity = 0;
         std::mutex g_player_mutex;
         double g_player_position[3]{};
+        std::vector<std::array<double, 6>> g_ropes;  // also under g_player_mutex
         std::atomic<bool> g_night_vision{ false };
         ID3D11VertexShader* g_vs_full = nullptr;
         ID3D11PixelShader* g_ps_full = nullptr;
@@ -857,6 +863,108 @@ float4 PSFull() : SV_Target {
             }
         }
 
+        // The lights of a section. Not used as light yet: only what burns is kept.
+        void on_lights(const std::uint8_t* data, std::uint64_t bytes)
+        {
+            if (bytes < sizeof(proto::RenLights))
+            {
+                return;
+            }
+
+            const auto* hdr = reinterpret_cast<const proto::RenLights*>(data);
+            const auto key = section_key(hdr->sx, hdr->sy, hdr->sz);
+
+            std::vector<std::uint16_t> burning;
+
+            if (bytes >= sizeof(proto::RenLights) + std::uint64_t(hdr->count) * sizeof(proto::RenLight))
+            {
+                const auto* lights = reinterpret_cast<const proto::RenLight*>(data + sizeof(proto::RenLights));
+
+                for (std::uint32_t i = 0; i < hdr->count; ++i)
+                {
+                    // The colour's top byte: light kind in the low bits, hazard in the high ones.
+                    const std::uint32_t hazard = (lights[i].color >> 28) & 0xF;
+
+                    if (hazard != proto::kHazardNone)
+                    {
+                        burning.push_back(static_cast<std::uint16_t>(
+                            (lights[i].x & 15) | ((lights[i].y & 15) << 4) | ((lights[i].z & 15) << 8) | (hazard << 12)
+                        ));
+                    }
+                }
+            }
+
+            std::scoped_lock lock(g_solids_mutex);
+
+            if (burning.empty())
+            {
+                g_hazards.erase(key);
+            }
+            else
+            {
+                g_hazards[key] = std::move(burning);
+            }
+        }
+
+        void on_shapes(const std::uint8_t* data, std::uint64_t bytes)
+        {
+            if (bytes < sizeof(proto::RenShapes))
+            {
+                return;
+            }
+
+            const auto* hdr = reinterpret_cast<const proto::RenShapes*>(data);
+            const auto key = section_key(hdr->sx, hdr->sy, hdr->sz);
+
+            std::vector<std::array<float, 6>> boxes;
+
+            if (bytes >= sizeof(proto::RenShapes) + std::uint64_t(hdr->count) * sizeof(proto::RenShape))
+            {
+                const auto* shapes = reinterpret_cast<const proto::RenShape*>(data + sizeof(proto::RenShapes));
+
+                boxes.reserve(hdr->count);
+
+                for (std::uint32_t i = 0; i < hdr->count; ++i)
+                {
+                    const auto& shape = shapes[i];
+                    const float bx = float(hdr->sx * 16 + shape.x);
+                    const float by = float(hdr->sy * 16 + shape.y);
+                    const float bz = float(hdr->sz * 16 + shape.z);
+
+                    boxes.push_back({
+                        bx + shape.min[0] / 16.0f, by + shape.min[1] / 16.0f, bz + shape.min[2] / 16.0f,
+                        bx + shape.max[0] / 16.0f, by + shape.max[1] / 16.0f, bz + shape.max[2] / 16.0f,
+                    });
+                }
+            }
+
+            static int reported = 0;
+
+            if (reported < 5)
+            {
+                ++reported;
+
+                RC::Output::send<RC::LogLevel::Verbose>(
+                    STR("SBMP world: section ({}, {}, {}) has {} boxes of doors, fences and the like\n"),
+                    hdr->sx,
+                    hdr->sy,
+                    hdr->sz,
+                    boxes.size()
+                );
+            }
+
+            std::scoped_lock lock(g_solids_mutex);
+
+            if (boxes.empty())
+            {
+                g_shapes.erase(key);
+            }
+            else
+            {
+                g_shapes[key] = std::move(boxes);
+            }
+        }
+
         void on_atlas(ID3D11Device* device, const std::uint8_t* data, std::uint64_t bytes)
         {
             if (bytes < sizeof(proto::RenAtlas))
@@ -1173,7 +1281,15 @@ float4 PSFull() : SV_Target {
 
             const auto& entities = g_entities;
 
-            if (entities.count == 0 && entities.hasSelection == 0)
+            std::vector<std::array<double, 6>> ropes;
+
+            {
+                std::scoped_lock lock(g_player_mutex);
+
+                ropes = g_ropes;
+            }
+
+            if (entities.count == 0 && entities.hasSelection == 0 && ropes.empty())
             {
                 return;
             }
@@ -1246,6 +1362,48 @@ float4 PSFull() : SV_Target {
             g_dynamic.insert(g_dynamic.end(), cracks.begin(), cracks.end());
             g_dynamic_cracks = static_cast<std::uint32_t>(cracks.size());
 
+            // Leads: a sagging rope from the player to each character on one.
+            // Lines are a pixel wide, so each rope is a few of them side by side.
+            for (const auto& rope : ropes)
+            {
+                constexpr int kPieces = 10;
+                constexpr std::uint32_t kRope = 0xFF2B5A8Bu;  // Minecraft's lead brown
+
+                // Unreal to blocks, in Minecraft's order of axes.
+                const double from[3] = { rope[0] / proto::kUnitsPerBlock - o[0], rope[2] / proto::kUnitsPerBlock - o[1], rope[1] / proto::kUnitsPerBlock - o[2] };
+                const double to[3] = { rope[3] / proto::kUnitsPerBlock - o[0], rope[5] / proto::kUnitsPerBlock - o[1], rope[4] / proto::kUnitsPerBlock - o[2] };
+                const double span = std::sqrt(
+                    (to[0] - from[0]) * (to[0] - from[0]) + (to[1] - from[1]) * (to[1] - from[1]) + (to[2] - from[2]) * (to[2] - from[2]));
+                // A slack rope hangs; at full length (6 blocks) it is taut.
+                const double sag = span < 6.0 ? (6.0 - span) * 0.2 : 0.0;
+
+                static constexpr float kStrands[5][2] = { { 0.0f, 0.0f }, { 0.015f, 0.0f }, { -0.015f, 0.0f }, { 0.0f, 0.015f }, { 0.0f, -0.015f } };
+
+                for (const auto& strand : kStrands)
+                {
+                    for (int piece = 0; piece < kPieces; ++piece)
+                    {
+                        for (int end = 0; end < 2; ++end)
+                        {
+                            const double t = static_cast<double>(piece + end) / kPieces;
+
+                            g_dynamic.push_back({
+                                static_cast<float>(from[0] + (to[0] - from[0]) * t) + strand[0],
+                                static_cast<float>(from[1] + (to[1] - from[1]) * t - sag * 4.0 * t * (1.0 - t)) + strand[1],
+                                static_cast<float>(from[2] + (to[2] - from[2]) * t) + strand[0],
+                                0,
+                                0,
+                                kRope,
+                                kFullSkyLight,
+                                kFlagUntextured,
+                            });
+
+                            ++g_dynamic_lines;
+                        }
+                    }
+                }
+            }
+
             if (entities.hasSelection != 0)
             {
                 // The outline of the block the crosshair is on: its twelve edges, a hair outside it.
@@ -1276,7 +1434,7 @@ float4 PSFull() : SV_Target {
                     }
                 }
 
-                g_dynamic_lines = 24;
+                g_dynamic_lines += 24;
             }
 
             if (g_dynamic.empty())
@@ -1479,6 +1637,13 @@ float4 PSFull() : SV_Target {
         g_player_position[2] = z;
     }
 
+    void set_ropes(const std::vector<std::array<double, 6>>& ropes)
+    {
+        std::scoped_lock lock(g_player_mutex);
+
+        g_ropes = ropes;
+    }
+
     void set_night_vision(bool on)
     {
         g_night_vision.store(on, std::memory_order_relaxed);
@@ -1546,7 +1711,17 @@ float4 PSFull() : SV_Target {
                     std::scoped_lock lock(g_solids_mutex);
 
                     g_solids.clear();
+                    g_hazards.clear();
+                    g_shapes.clear();
                 }
+                break;
+
+            case proto::kRenLights:
+                on_lights(payload, msg.payloadBytes);
+                break;
+
+            case proto::kRenShapes:
+                on_shapes(payload, msg.payloadBytes);
                 break;
 
             case proto::kRenSolids:
@@ -1724,6 +1899,72 @@ float4 PSFull() : SV_Target {
         const int bit = (x & 15) + 16 * (z & 15) + 256 * (y & 15);
 
         return (it->second[bit >> 3] >> (bit & 7)) & 1;
+    }
+
+    int hazard_at(int x, int y, int z)
+    {
+        std::scoped_lock lock(g_solids_mutex);
+
+        const auto it = g_hazards.find(section_key(x >> 4, y >> 4, z >> 4));
+
+        if (it == g_hazards.end())
+        {
+            return 0;
+        }
+
+        const std::uint16_t cell = static_cast<std::uint16_t>((x & 15) | ((y & 15) << 4) | ((z & 15) << 8));
+
+        for (const auto packed : it->second)
+        {
+            if ((packed & 0x0FFF) == cell)
+            {
+                return packed >> 12;
+            }
+        }
+
+        return 0;
+    }
+
+    void shapes_in(const double low[3], const double high[3], std::vector<std::array<float, 6>>& out)
+    {
+        std::scoped_lock lock(g_solids_mutex);
+
+        if (g_shapes.empty())
+        {
+            return;
+        }
+
+        const int sx0 = static_cast<int>(std::floor(low[0])) >> 4, sx1 = static_cast<int>(std::floor(high[0])) >> 4;
+        const int sy0 = static_cast<int>(std::floor(low[1])) >> 4, sy1 = static_cast<int>(std::floor(high[1])) >> 4;
+        const int sz0 = static_cast<int>(std::floor(low[2])) >> 4, sz1 = static_cast<int>(std::floor(high[2])) >> 4;
+
+        for (int sy = sy0; sy <= sy1; ++sy)
+        {
+            for (int sz = sz0; sz <= sz1; ++sz)
+            {
+                for (int sx = sx0; sx <= sx1; ++sx)
+                {
+                    const auto it = g_shapes.find(section_key(sx, sy, sz));
+
+                    if (it == g_shapes.end())
+                    {
+                        continue;
+                    }
+
+                    for (const auto& box : it->second)
+                    {
+                        if (
+                            box[0] < high[0] && box[3] > low[0] &&
+                            box[1] < high[1] && box[4] > low[1] &&
+                            box[2] < high[2] && box[5] > low[2]
+                        )
+                        {
+                            out.push_back(box);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     void shutdown()

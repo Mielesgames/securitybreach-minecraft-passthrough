@@ -346,6 +346,8 @@ namespace collision
 
             // What Minecraft has.
             bool sent = false;
+            // What Minecraft has is known to be out of date.
+            bool dirty = false;
             std::uint64_t sent_hash = 0;
             ULONGLONG scanned_tick = 0;
 
@@ -379,6 +381,7 @@ namespace collision
         void begin_scan(Region& region)
         {
             region.scanning = true;
+            region.dirty = false;
             region.solid.assign(std::size_t(kRegionCells) * kRegionCells * kRegionCells, 0);
             region.top.assign(region.solid.size(), 0.0f);
             region.pending.clear();
@@ -726,7 +729,7 @@ namespace collision
                         slot->rz = rz;
                     }
 
-                    if (slot->sent && !slot->scanning && tick - slot->scanned_tick < kRescanMs)
+                    if (slot->sent && !slot->scanning && !slot->dirty && tick - slot->scanned_tick < kRescanMs)
                     {
                         continue;
                     }
@@ -735,8 +738,8 @@ namespace collision
                     const double cy = (ry + 0.5) * kRegionBlocks - y;
                     const double cz = (rz + 0.5) * kRegionBlocks - z;
 
-                    wanted.push_back({ slot.get(), cx * cx + cy * cy + cz * cz, !slot->sent });
-                    urgent = urgent || !slot->sent;
+                    wanted.push_back({ slot.get(), cx * cx + cy * cy + cz * cz, !slot->sent || slot->dirty });
+                    urgent = urgent || !slot->sent || slot->dirty;
                 }
             }
         }
@@ -767,7 +770,8 @@ namespace collision
         const double from[3],
         const double to[3],
         double thickness,
-        RC::Unreal::UObject** component
+        RC::Unreal::UObject** component,
+        double* impact
     )
     {
         if (component != nullptr)
@@ -801,6 +805,18 @@ namespace collision
             *component = hit_component(function);
         }
 
+        if (impact != nullptr)
+        {
+            float point[3]{};
+
+            std::memcpy(point, function.params.data() + function.impact_point, sizeof(point));
+
+            for (int i = 0; i < 3; ++i)
+            {
+                impact[i] = point[i];
+            }
+        }
+
         return hit_actor(function);
     }
 
@@ -828,6 +844,39 @@ namespace collision
         }
 
         return call(function, character) ? hit_actor(function) : nullptr;
+    }
+
+    void invalidate(double x, double y, double z, double radius)
+    {
+        const auto region_of = [](double v)
+        {
+            return static_cast<int>(std::floor(v / kRegionBlocks));
+        };
+
+        for (int ry = region_of(y - radius); ry <= region_of(y + radius); ++ry)
+        {
+            for (int rz = region_of(z - radius); rz <= region_of(z + radius); ++rz)
+            {
+                for (int rx = region_of(x - radius); rx <= region_of(x + radius); ++rx)
+                {
+                    const auto it = g_regions.find(region_key(rx, ry, rz));
+
+                    if (it == g_regions.end() || !it->second->sent)
+                    {
+                        continue;
+                    }
+
+                    it->second->dirty = true;
+
+                    // A scan that is half done saw the old situation: start over.
+                    if (it->second->scanning)
+                    {
+                        begin_scan(*it->second);
+                        it->second->dirty = true;
+                    }
+                }
+            }
+        }
     }
 
     int regions_sent()

@@ -31,7 +31,8 @@ namespace collision
         const double from[3],
         const double to[3],
         double thickness,
-        RC::Unreal::UObject** component = nullptr
+        RC::Unreal::UObject** component = nullptr,
+        double* impact = nullptr
     );
 
     // What a ray you can see along hits first (the game's visibility
@@ -44,6 +45,11 @@ namespace collision
         const double to[3],
         double thickness
     );
+
+    // Something changed around this point (Minecraft coordinates, blocks): a
+    // door opened or closed. The regions within `radius` are scanned again
+    // right away instead of when their turn comes.
+    void invalidate(double x, double y, double z, double radius);
 
     // Regions sent to Minecraft so far, for the log.
     int regions_sent();

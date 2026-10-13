@@ -27,6 +27,8 @@ namespace input
         bool g_use_released = false;   // its button went up again while waiting
         bool g_use_forwarded = false;  // Minecraft has the button down
         bool g_attack_pending = false;
+        bool g_attack_held = false;
+        bool g_grab_held = false;
 
         // What reached us since the last report, to see how the game reads its mouse.
         int g_raw_moves = 0;
@@ -175,16 +177,20 @@ namespace input
             case WM_LBUTTONDOWN:
             case WM_LBUTTONDBLCLK:
                 g_attack_pending = !g_screen_open;
+                g_attack_held = !g_screen_open;
                 return mouse_button(1, true);
 
             case WM_LBUTTONUP:
+                g_attack_held = false;
                 return mouse_button(1, false);
 
             case WM_MBUTTONDOWN:
             case WM_MBUTTONDBLCLK:
+                g_grab_held = !g_screen_open;
                 return mouse_button(2, true);
 
             case WM_MBUTTONUP:
+                g_grab_held = false;
                 return mouse_button(2, false);
 
             case WM_RBUTTONDOWN:
@@ -312,6 +318,8 @@ namespace input
                 if (message == WM_KILLFOCUS)
                 {
                     release_all();
+                    g_attack_held = false;
+                    g_grab_held = false;
                 }
                 else if (handle(window, message, wparam, lparam))
                 {
@@ -356,6 +364,8 @@ namespace input
             g_use_pending = false;
             g_use_forwarded = false;
             g_attack_pending = false;
+            g_attack_held = false;
+            g_grab_held = false;
         }
 
         // A screen just opened: its cursor starts in the middle.
@@ -367,6 +377,25 @@ namespace input
             if (minecraft_mode)
             {
                 move_cursor(0, 0);
+            }
+        }
+
+        // Back in Minecraft's hands (after a pause, a loading hitch, alt-tab):
+        // the keys that are physically down count again. Without this Steve
+        // stops until the key is pressed anew.
+        if (!g_minecraft_mode && minecraft_mode && ::GetForegroundWindow() == g_window)
+        {
+            static constexpr int kHeld[] = { 'W', 'A', 'S', 'D', VK_SPACE, VK_SHIFT, VK_CONTROL };
+
+            for (const int vk : kHeld)
+            {
+                if ((::GetAsyncKeyState(vk) & 0x8000) != 0)
+                {
+                    if (const auto scancode = to_scancode(static_cast<WPARAM>(vk), 0))
+                    {
+                        g_link->push_input(skycraft::proto::kInKey, scancode, 1);
+                    }
+                }
             }
         }
 
@@ -431,6 +460,16 @@ namespace input
         g_attack_pending = false;
 
         return pending;
+    }
+
+    bool grab_held()
+    {
+        return g_grab_held && !g_screen_open;
+    }
+
+    bool attack_held()
+    {
+        return g_attack_held && !g_screen_open;
     }
 
     void uninstall()

@@ -105,6 +105,14 @@ namespace skycraft::proto
 		kMcNightVision = 1u << 9,  // the night vision effect is active
 		kMcCreative = 1u << 10,    // creative mode: breaks things in one hit
 		kMcHoldsSword = 1u << 11,  // a sword in the main hand: in creative it breaks nothing
+		kMcHoldsFlipTag = 1u << 12,  // a name tag named Dinnerbone or Grumm in the main hand
+		kMcDoorsLocked = 1u << 13,   // gamerule skycraft:allow_opening_doors is off
+		kMcBlocking = 1u << 19,      // a shield is up: host characters in front bounce off it and can't grab the player
+		kMcScoping = 1u << 18,       // looking through a spyglass: the host zooms its camera in too
+		kMcHoldsBucket = 1u << 17,   // a water bucket in the main hand, and the gamerule lets it scoop up a host character
+		kMcHiding = 1u << 16,        // the player sits on the hiding seat (kInHide); getting off it is leaving the hiding spot
+		kMcHoldsLead = 1u << 15,     // a lead in the main hand: right-click puts a host character on it
+		kMcRidingHost = 1u << 14,    // the player rides Freddy's mule: the host keeps Freddy under the rider
 	};
 
 	struct McState
@@ -121,7 +129,7 @@ namespace skycraft::proto
 		float         fovDeg;         // effective vertical FOV (includes sprint / fluid modifiers)
 		float         bobPhase;       // MC walk-bob phase (interpolated walk distance); 0 if bobbing is off
 		float         bobAmount;      // MC walk-bob amplitude
-		std::uint32_t pad4C;
+		std::uint32_t heldToken;      // Security Breach: id of the paper of a broken object in the main hand (0: none)
 		double        eyeX, eyeY, eyeZ;  // MC camera position (interpolated, includes sneak eye lerp)
 
 		// Raw 20 Hz physics ticks, so Skyrim can interpolate on its own frame clock exactly like
@@ -186,6 +194,20 @@ namespace skycraft::proto
 		kInHurt = 7,         // Skyrim hit the player: code = HurtKind, a = Skyrim damage * 100, b = attacker FormID, c = HurtFlags
 		kInOpenMenu = 8,     // open Minecraft's pause/options menu
 		kInSwing = 9,        // swing the main hand (the player used something in the host game)
+		kInTokenName = 11,   // part of a broken object's name: code = token id, a, b, c = 12 characters (latin-1, 0 = end)
+		kInDropToken = 12,   // drop the paper for a broken object: code = token id, a, b, c = where (Minecraft x 100)
+		kInLeash = 20,       // code 1: put Minecraft's lead on the host character a (its ActorTable id), held by the
+		                     // player; code 0: take it off
+		kInPickToken = 19,   // creative pick: give the item that makes copies of a host thing (code = token, named by
+		                     // kInTokenName). a = 1: a character (a spawn egg), 0: an object (its paper)
+		kInChatSay = 18,     // show the text gathered under this code (kInChatText) in the chat
+		kInChatText = 17,    // twelve more characters (a, b, c, latin-1) of a chat line; code = which line
+		kInBucketToken = 16, // a host character was scooped up: the water bucket in hand becomes its bucket
+		                     // (code = token, named by kInTokenName). Using it puts the character back.
+		kInHide = 15,        // code 1: the host player is in a hiding spot at a, b, c (Minecraft x 100): sit the player
+		                     // on an unseen seat there. code 0: out of it again, the seat goes.
+		kInMountFreddy = 14, // the player used Freddy: onto his mule, which stands at a, b, c (Minecraft x 100)
+		kInUseToken = 13,    // that object was put back: code = token id; one paper of it in the hand is used up
 		kInBreakEffect = 10, // something in the host game broke: block-break particles and sound at
 		                     // a, b, c (Minecraft coordinates x 100), two blocks tall
 	};
@@ -255,6 +277,17 @@ namespace skycraft::proto
 		                    // flags = flight pitch (float bits), weapon = arrow texture (0 plain, 1 tipped, 2 spectral)
 		kEvSkillUse = 5,    // the player used a Skyrim skill in Minecraft: formId = Skyrim skill (ActorValue: 9 Block,
 		                    // 10 Smithing, 11 Heavy Armor, 12 Light Armor), a = uses (as Skyrim's AdvanceSkill counts them)
+		kEvLeash = 12,      // a host character is on a lead: formId, a/b/c = where the other end is (the player's
+		                    // hand or a fence knot). Every tick while it is; flags 0: the lead is off
+		kEvActorWings = 11, // a dispenser put an elytra on a host character's stand-in (flags 1) or it came off (0)
+		kEvActorPush = 10,  // Minecraft moves a host character: formId, a/b/c = blocks this tick (water, bubble
+		                    // column, towards a villager). flags 1: thrown up instead (slime), 2: it walks there itself
+		kEvLeadPost = 9,    // the player used a fence at a, b, c (its middle): leads in hand are tied to it,
+		                    // or, with none in hand, the ones tied there come off
+		kEvActorAt = 8,     // a host character's stand-in sits in a boat or minecart: formId, a/b/c = where (its feet),
+		                    // d = yaw. Sent every tick while it does; the host keeps the character there.
+		kEvRedstone = 7,    // a redstone source near the player switched: a/b/c = its block, flags = 1 on / 0 off.
+		                    // Security Breach's doors within a few blocks of one open.
 		kEvCommand = 6,     // a chat command about one of the host game's characters: formId = HostCharacter,
 		                    // flags = 0: bring it to the player, 1: spawn a new one
 	};
@@ -372,11 +405,30 @@ namespace skycraft::proto
 		                      // section NPCs collide with (sent after its kRenSection; 0 = none)
 		kRenDug = 11,         // RenDug + 512-byte bitset (bit x + 16z + 256y): which blocks of a section
 		                      // were dug out of Skyrim's world (its geometry there is gone); 0 = none
+		kRenShapes = 12,      // RenShapes + RenShape[count]: the collision boxes of a section's blocks that
+		                      // aren't full cubes (doors, fences, slabs), which kRenSolids then leaves out;
+		                      // sent after it (0 = none). Security Breach only.
 		kRenRagdoll = 9,      // RenAvatar + RenBatch[] + RenVertex[]: the player's body standing still,
 		                      // relative to the feet and facing +Z, split into its parts (RenBatch
 		                      // flags bits 8-11: RagdollPart). Sent about once a second while alive;
 		                      // Skyrim hangs the parts on its ragdoll when the player dies.
 	};
+
+	struct RenShapes
+	{
+		std::int32_t  sx, sy, sz;  // section coords, as in RenSection
+		std::uint32_t count;       // boxes
+	};
+
+	struct RenShape
+	{
+		std::uint8_t x, y, z;     // block within the section
+		std::uint8_t pad;
+		std::uint8_t min[3];      // the box inside that block, in sixteenths (0-16)
+		std::uint8_t max[3];
+		std::uint8_t pad2[2];
+	};
+	static_assert(sizeof(RenShape) == 12);
 
 	struct RenSolids
 	{

@@ -83,6 +83,7 @@ public final class SkyCombat {
 		if (SkyLink.readActors(ACTORS)) {
 			sync(level);
 		}
+		FreddyMount.follow(level, PROXIES.values());
 		// Hits land during the tick (melee, sweeps, arrows, fire); send one combined hit per actor.
 		for (SkyrimActorEntity proxy : PROXIES.values()) {
 			float[] hit = proxy.takeHit();
@@ -92,6 +93,262 @@ public final class SkyCombat {
 				);
 				SkyCraft.LOG.info("SkyCraft: hit {} for {} (knockback {})", proxy.getName().getString(), hit[0], hit[3]);
 			}
+		}
+	}
+
+	private static final Map<Integer, Long> NEXT_ATTACK = new HashMap<>();
+
+	/** A hostile host character (Security Breach's animatronics) hurts villagers it walks into. */
+	private static void attackVillagers(ServerLevel level, SkyrimActorEntity proxy) {
+		long now = level.getGameTime();
+		if (NEXT_ATTACK.getOrDefault(proxy.formId(), 0L) > now) {
+			return;
+		}
+		var victims = level.getEntitiesOfClass(net.minecraft.world.entity.npc.villager.Villager.class, proxy.getBoundingBox().inflate(0.6));
+		if (victims.isEmpty()) {
+			return;
+		}
+		NEXT_ATTACK.put(proxy.formId(), now + 20);
+		for (var villager : victims) {
+			villager.hurtServer(level, level.damageSources().mobAttack(proxy), 4.0F);
+		}
+	}
+
+	private static final Map<Integer, net.minecraft.world.entity.animal.allay.Allay> LEAD_HOLDERS = new HashMap<>();
+	private static final String LEAD_TAG = "skycraft_lead_holder";
+
+	/**
+	 * A lead on a host character is Minecraft's own lead, on an allay nobody sees that is kept where
+	 * the character's stand-in is. So it is drawn, tied to fences and broken the way leads are; the
+	 * host only hears where the other end is and keeps the character within reach of it.
+	 */
+	public static void leash(net.minecraft.server.level.ServerPlayer player, int formId, boolean on) {
+		var held = LEAD_HOLDERS.remove(formId);
+		if (held != null) {
+			// Off: the lead drops where the character stands, like off any animal.
+			if (!held.isRemoved() && held.isLeashed()) {
+				held.dropLeash();
+			}
+			held.discard();
+		}
+		SkyrimActorEntity proxy = PROXIES.get(formId);
+		if (!on || proxy == null || !(player.level() instanceof ServerLevel level)) {
+			SkyLink.pushEvent(Proto.EV_LEASH, formId, 0, 0, 0, 0, 0);
+			return;
+		}
+		var holder = net.minecraft.world.entity.EntityTypes.ALLAY.create(level, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
+		if (holder == null) {
+			return;
+		}
+		holder.addTag(LEAD_TAG);
+		holder.setNoAi(true);
+		holder.setNoGravity(true);
+		holder.setSilent(true);
+		holder.setPermanentlyInvulnerable(true);
+		holder.setPersistenceRequired();
+		holder.setInvisible(true);
+		holder.addEffect(new net.minecraft.world.effect.MobEffectInstance(
+			net.minecraft.world.effect.MobEffects.INVISIBILITY, net.minecraft.world.effect.MobEffectInstance.INFINITE_DURATION, 0, false, false));
+		holder.snapTo(proxy.getX(), proxy.getY() + proxy.getBbHeight() * 0.5, proxy.getZ(), proxy.getYRot(), 0.0F);
+		if (!level.addFreshEntity(holder)) {
+			return;
+		}
+		holder.setLeashedTo(player, true);
+		if (!player.getAbilities().instabuild && player.getMainHandItem().is(net.minecraft.world.item.Items.LEAD)) {
+			player.getMainHandItem().shrink(1);
+		}
+		LEAD_HOLDERS.put(formId, holder);
+		SkyCraft.LOG.info("SkyCraft: {} is on a lead", proxy.getName().getString());
+	}
+
+	/** Keeps the lead's allay on the stand-in and tells the host where the lead's other end is. */
+	private static void followLead(SkyrimActorEntity proxy, int formId) {
+		var holder = LEAD_HOLDERS.get(formId);
+		if (holder == null) {
+			return;
+		}
+		var end = holder.isRemoved() ? null : holder.getLeashHolder();
+		if (end == null) {
+			// Snapped, cut, or the knot was punched off: Minecraft dropped the lead already.
+			LEAD_HOLDERS.remove(formId);
+			holder.discard();
+			SkyLink.pushEvent(Proto.EV_LEASH, formId, 0, 0, 0, 0, 0);
+			SkyCraft.LOG.info("SkyCraft: {} is off the lead", proxy.getName().getString());
+			return;
+		}
+		holder.snapTo(proxy.getX(), proxy.getY() + proxy.getBbHeight() * 0.5, proxy.getZ(), proxy.getYRot(), 0.0F);
+		holder.setDeltaMovement(net.minecraft.world.phys.Vec3.ZERO);
+		// A hand is about a block up; a knot sits in the middle of its fence.
+		double up = end instanceof net.minecraft.world.entity.player.Player ? 1.0 : 0.5;
+		SkyLink.pushEvent(Proto.EV_LEASH, formId, (float) end.getX(), (float) (end.getY() + up), (float) end.getZ(), 0, 1);
+	}
+
+	private static final Map<Integer, net.minecraft.world.entity.monster.zombie.Zombie> JOCKEYS = new HashMap<>();
+	private static final java.util.Set<Integer> JOCKEY_ROLLED = new java.util.HashSet<>();
+	private static final String JOCKEY_TAG = "skycraft_jockey";
+	/** One hostile character in ten is a chicken jockey. */
+	private static final float JOCKEY_CHANCE = 0.1F;
+
+	/**
+	 * A chicken jockey: a chicken with a baby zombie nobody sees on it, which rides after the player
+	 * the way jockeys do. The host keeps the character on the chicken. Decided once per character,
+	 * the first time it comes near; never Freddy. True while it rides.
+	 */
+	private static boolean jockey(ServerLevel level, SkyrimActorEntity proxy, SkyLink.Actor a) {
+		int id = a.formId();
+		if (JOCKEY_ROLLED.add(id) && a.hostile() && level.getRandom().nextFloat() < JOCKEY_CHANCE) {
+			var chicken = net.minecraft.world.entity.EntityTypes.CHICKEN.create(level, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
+			var rider = net.minecraft.world.entity.EntityTypes.ZOMBIE.create(level, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
+			if (chicken != null && rider != null) {
+				chicken.snapTo(a.x(), a.y(), a.z(), a.yaw(), 0.0F);
+				chicken.addTag(JOCKEY_TAG);
+				chicken.setPersistenceRequired();
+				rider.snapTo(a.x(), a.y(), a.z(), a.yaw(), 0.0F);
+				rider.addTag(JOCKEY_TAG);
+				rider.setBaby(true);
+				rider.setSilent(true);
+				rider.setPersistenceRequired();
+				rider.setInvisible(true);
+				rider.addEffect(new net.minecraft.world.effect.MobEffectInstance(
+					net.minecraft.world.effect.MobEffects.INVISIBILITY, net.minecraft.world.effect.MobEffectInstance.INFINITE_DURATION, 0, false, false));
+				if (level.addFreshEntity(chicken) && level.addFreshEntity(rider) && rider.startRiding(chicken, true, false)) {
+					JOCKEYS.put(id, rider);
+					SkyCraft.LOG.info("SkyCraft: {} is a chicken jockey", proxy.getName().getString());
+				} else {
+					chicken.discard();
+					rider.discard();
+				}
+			}
+		}
+		var rider = JOCKEYS.get(id);
+		if (rider == null) {
+			return false;
+		}
+		var chicken = rider.getVehicle();
+		if (rider.isRemoved() || !rider.isAlive() || chicken == null) {
+			// Killed, or knocked off its chicken: the character walks again.
+			JOCKEYS.remove(id);
+			if (!rider.isRemoved()) {
+				rider.discard();
+			}
+			SkyCraft.LOG.info("SkyCraft: {} lost its chicken", proxy.getName().getString());
+			return false;
+		}
+		// Sitting on the chicken's back.
+		SkyLink.pushEvent(Proto.EV_ACTOR_AT, id, (float) chicken.getX(), (float) chicken.getY() + 0.4F, (float) chicken.getZ(), chicken.getYRot(), 0);
+		return true;
+	}
+
+	private static final Map<Integer, Long> NEXT_BOUNCE = new HashMap<>();
+	private static final Map<Integer, Boolean> WINGS = new HashMap<>();
+	private static final Map<Integer, net.minecraft.world.entity.animal.allay.Allay> GUIDES = new HashMap<>();
+	private static final String GUIDE_TAG = "skycraft_freddy_allay";
+
+	/**
+	 * Freddy with wings is an allay: a real one nobody sees, which likes the nearest player and so
+	 * follows them the way allays do. The host keeps Freddy where the allay is.
+	 */
+	private static void guide(ServerLevel level, SkyrimActorEntity proxy, int id) {
+		var allay = GUIDES.get(id);
+		if (allay == null || allay.isRemoved() || allay.level() != level) {
+			// Ones left from an earlier session.
+			for (var old : level.getEntitiesOfClass(net.minecraft.world.entity.animal.allay.Allay.class, proxy.getBoundingBox().inflate(128.0), e -> e.entityTags().contains(GUIDE_TAG))) {
+				old.discard();
+			}
+			allay = net.minecraft.world.entity.EntityTypes.ALLAY.create(level, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
+			if (allay == null) {
+				return;
+			}
+			allay.addTag(GUIDE_TAG);
+			allay.setSilent(true);
+			allay.setPermanentlyInvulnerable(true);
+			allay.setPersistenceRequired();
+			allay.setInvisible(true);
+			allay.addEffect(new net.minecraft.world.effect.MobEffectInstance(
+				net.minecraft.world.effect.MobEffects.INVISIBILITY, net.minecraft.world.effect.MobEffectInstance.INFINITE_DURATION, 0, false, false));
+			allay.snapTo(proxy.getX(), proxy.getY() + 1.0, proxy.getZ(), proxy.getYRot(), 0.0F);
+			if (!level.addFreshEntity(allay)) {
+				return;
+			}
+			GUIDES.put(id, allay);
+			SkyCraft.LOG.info("SkyCraft: {} follows an allay now", proxy.getName().getString());
+		}
+		var player = level.getNearestPlayer(allay, 64.0);
+		if (player != null) {
+			allay.getBrain().setMemory(net.minecraft.world.entity.ai.memory.MemoryModuleType.LIKED_PLAYER, player.getUUID());
+		}
+		// Freddy hangs under it: his feet two blocks below, so his head is about where the allay flies.
+		SkyLink.pushEvent(Proto.EV_ACTOR_AT, id, (float) allay.getX(), (float) allay.getY() - 2.0F, (float) allay.getZ(), allay.getYRot(), 0);
+	}
+
+	/**
+	 * What Minecraft's world does to a host character, told to the host (which moves it): water
+	 * carries it along, a bubble column lifts it or drags it down, slime throws it up, a hostile one
+	 * goes after a villager nearby, and an elytra from a dispenser gives it wings.
+	 */
+	private static void surroundings(ServerLevel level, SkyrimActorEntity proxy, SkyLink.Actor a) {
+		int id = a.formId();
+		long now = level.getGameTime();
+		boolean wings = proxy.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.CHEST).is(net.minecraft.world.item.Items.ELYTRA);
+		Boolean had = WINGS.put(id, wings);
+		if ((had == null ? wings : had != wings) || (wings && now % 40 == 0)) {
+			SkyLink.pushEvent(Proto.EV_ACTOR_WINGS, id, 0, 0, 0, 0, wings ? 1 : 0);
+			if (had == null || had != wings) {
+				SkyCraft.LOG.info("SkyCraft: {} {}", proxy.getName().getString(), wings ? "got wings" : "lost its wings");
+			}
+		}
+		if (wings && a.name().toLowerCase(java.util.Locale.ROOT).contains("freddy")) {
+			guide(level, proxy, id);
+			return;
+		}
+		var guide = GUIDES.remove(id);
+		if (guide != null) {
+			guide.discard();
+		}
+		if (wings) {
+			// In the air the host flies it; the ground's water and slime don't reach it.
+			return;
+		}
+		var feet = proxy.blockPosition();
+		var state = level.getBlockState(feet);
+		double px = 0, py = 0, pz = 0;
+		int flags = 0;
+		if (state.is(net.minecraft.world.level.block.Blocks.BUBBLE_COLUMN)) {
+			py = state.getValue(net.minecraft.world.level.block.BubbleColumnBlock.DRAG_DOWN) ? -0.2 : 0.35;
+		} else {
+			var fluid = level.getFluidState(feet);
+			if (fluid.is(net.minecraft.tags.FluidTags.WATER)) {
+				var flow = fluid.getFlow(level, feet);
+				px = flow.x * 0.12;
+				py = flow.y * 0.12;
+				pz = flow.z * 0.12;
+			} else if (level.getBlockState(net.minecraft.core.BlockPos.containing(a.x(), a.y() - 0.1, a.z())).is(net.minecraft.world.level.block.Blocks.SLIME_BLOCK)) {
+				if (NEXT_BOUNCE.getOrDefault(id, 0L) <= now) {
+					NEXT_BOUNCE.put(id, now + 12);
+					flags = 1;
+				}
+			} else if (a.hostile()) {
+				// Not carried by anything: a villager within ten blocks is worth walking to.
+				var villagers = level.getEntitiesOfClass(net.minecraft.world.entity.npc.villager.Villager.class, proxy.getBoundingBox().inflate(10.0, 3.0, 10.0));
+				net.minecraft.world.entity.npc.villager.Villager prey = null;
+				for (var villager : villagers) {
+					if (prey == null || villager.distanceToSqr(proxy) < prey.distanceToSqr(proxy)) {
+						prey = villager;
+					}
+				}
+				if (prey != null) {
+					double dx = prey.getX() - a.x(), dz = prey.getZ() - a.z();
+					double far = Math.sqrt(dx * dx + dz * dz);
+					if (far > 0.8) {
+						px = dx / far * 0.16;
+						pz = dz / far * 0.16;
+						flags = 2;
+					}
+				}
+			}
+		}
+		if (px != 0 || py != 0 || pz != 0 || flags != 0) {
+			SkyLink.pushEvent(Proto.EV_ACTOR_PUSH, id, (float) px, (float) py, (float) pz, 0, flags);
 		}
 	}
 
@@ -110,6 +367,35 @@ public final class SkyCombat {
 				it.remove();
 			}
 		}
+		// The helpers of characters that are gone go with them.
+		GUIDES.entrySet().removeIf(e -> {
+			if (!live.containsKey(e.getKey())) {
+				e.getValue().discard();
+				return true;
+			}
+			return false;
+		});
+		LEAD_HOLDERS.entrySet().removeIf(e -> {
+			if (!live.containsKey(e.getKey())) {
+				if (!e.getValue().isRemoved() && e.getValue().isLeashed()) {
+					e.getValue().dropLeash();
+				}
+				e.getValue().discard();
+				return true;
+			}
+			return false;
+		});
+		JOCKEYS.entrySet().removeIf(e -> {
+			if (!live.containsKey(e.getKey())) {
+				var ride = e.getValue().getVehicle();
+				if (ride != null) {
+					ride.discard();
+				}
+				e.getValue().discard();
+				return true;
+			}
+			return false;
+		});
 		int before = PROXIES.size();
 		for (SkyLink.Actor a : live.values()) {
 			SkyrimActorEntity proxy = PROXIES.get(a.formId());
@@ -128,10 +414,30 @@ public final class SkyCombat {
 				continue;
 			}
 			proxy.setSize(a.width(), a.height());
+			if (proxy.isPassenger()) {
+				// Stuck in a boat or minecart: now it is Minecraft that says where the character is.
+				SkyLink.pushEvent(Proto.EV_ACTOR_AT, a.formId(), (float) proxy.getX(), (float) proxy.getY(), (float) proxy.getZ(), proxy.getYRot(), 0);
+				continue;
+			}
 			proxy.setPos(a.x(), a.y(), a.z());
 			proxy.setYRot(a.yaw());
 			proxy.setYHeadRot(a.yaw());
 			stepOnTriggers(level, proxy);
+			// Touching an empty boat or minecart: in it goes, like any mob.
+			for (var vehicle : level.getEntitiesOfClass(net.minecraft.world.entity.vehicle.VehicleEntity.class, proxy.getBoundingBox().inflate(0.15), v -> v.getPassengers().isEmpty())) {
+				if (proxy.startRiding(vehicle, true, false)) {
+					SkyCraft.LOG.info("SkyCraft: {} is stuck in a {}", proxy.getName().getString(), vehicle.getType().toShortString());
+					break;
+				}
+			}
+			if (a.hostile()) {
+				attackVillagers(level, proxy);
+			}
+			followLead(proxy, a.formId());
+			if (jockey(level, proxy, a)) {
+				continue;
+			}
+			surroundings(level, proxy, a);
 		}
 		if (PROXIES.size() != before && (PROXIES.size() % 5 == 0 || PROXIES.size() < 5)) {
 			SkyCraft.LOG.info("SkyCraft: {} Skyrim actors mirrored as hittable stand-ins", PROXIES.size());

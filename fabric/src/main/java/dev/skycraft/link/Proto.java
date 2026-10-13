@@ -42,6 +42,16 @@ public final class Proto {
 	public static final int IN_OPEN_MENU = 8;
 	public static final int IN_SWING = 9;
 	public static final int IN_BREAK_EFFECT = 10;
+	public static final int IN_TOKEN_NAME = 11;
+	public static final int IN_DROP_TOKEN = 12;
+	public static final int IN_USE_TOKEN = 13;
+	public static final int IN_MOUNT_FREDDY = 14;
+	public static final int IN_HIDE = 15;
+	public static final int IN_BUCKET_TOKEN = 16;
+	public static final int IN_CHAT_TEXT = 17;
+	public static final int IN_CHAT_SAY = 18;
+	public static final int IN_PICK_TOKEN = 19;
+	public static final int IN_LEASH = 20;
 	public static final int HURT_MELEE = 0;
 	public static final int HURT_PROJECTILE = 1;
 	public static final int HURT_MAGIC = 2;
@@ -72,6 +82,12 @@ public final class Proto {
 	public static final int EV_ARROW_STUCK = 4;
 	public static final int EV_SKILL_USE = 5;
 	public static final int EV_COMMAND = 6;
+	public static final int EV_REDSTONE = 7;
+	public static final int EV_ACTOR_AT = 8;
+	public static final int EV_LEAD_POST = 9;
+	public static final int EV_ACTOR_PUSH = 10;
+	public static final int EV_ACTOR_WINGS = 11;
+	public static final int EV_LEASH = 12;
 	/** Names for EV_COMMAND's formId (HostCharacter in the header): index + 1. */
 	public static final String[] HOST_CHARACTERS = { "freddy", "chica", "monty", "roxy", "vanny", "vanessa", "moon", "sun", "bot", "endo", "musicman" };
 	// Skyrim skills (ActorValue) Minecraft reports use of; weapon skills come from EV_HIT_ACTOR.
@@ -123,6 +139,7 @@ public final class Proto {
 	public static final int REN_RAGDOLL = 9;
 	public static final int REN_SOLIDS = 10;
 	public static final int REN_DUG = 11;
+	public static final int REN_SHAPES = 12;
 	public static final int PART_HEAD = 1, PART_BODY = 2, PART_RIGHT_ARM = 3, PART_LEFT_ARM = 4, PART_RIGHT_LEG = 5, PART_LEFT_LEG = 6;
 	public static final int LIGHT_STEADY = 0, LIGHT_FLAME = 1, LIGHT_LAVA = 2;
 	public static final int REN_VERTEX_BYTES = 32;
@@ -171,6 +188,7 @@ public final class Proto {
 	public static final long MS_FOV = 0x40;
 	public static final long MS_BOB_PHASE = 0x44;
 	public static final long MS_BOB_AMOUNT = 0x48;
+	public static final long MS_HELD_TOKEN = 0x4C;
 	public static final long MS_EYE_X = 0x50;
 	public static final long MS_EYE_Y = 0x58;
 	public static final long MS_EYE_Z = 0x60;
@@ -199,6 +217,14 @@ public final class Proto {
 	public static final int MC_NIGHT_VISION = 1 << 9;
 	public static final int MC_CREATIVE = 1 << 10;
 	public static final int MC_HOLDS_SWORD = 1 << 11;
+	public static final int MC_HOLDS_FLIP_TAG = 1 << 12;
+	public static final int MC_DOORS_LOCKED = 1 << 13;
+	public static final int MC_RIDING_HOST = 1 << 14;
+	public static final int MC_HOLDS_LEAD = 1 << 15;
+	public static final int MC_HIDING = 1 << 16;
+	public static final int MC_HOLDS_BUCKET = 1 << 17;
+	public static final int MC_SCOPING = 1 << 18;
+	public static final int MC_BLOCKING = 1 << 19;
 
 	// Overlay
 	public static final long OC_STATE = 0x00;

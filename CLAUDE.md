@@ -1,146 +1,122 @@
 # CLAUDE.md – securitybreach-minecraft-passthrough
 
+Doel (woorden van de gebruiker): **het hele spel moet als Steve te spelen zijn.** Minecraft-modus aan (F6) = Minecraft-physics en Minecraft-besturing hebben voorrang (ook vliegen in creative/spectator). Modus uit = onaangetast Security Breach.
+
 ## Project
-- Fork van `chasmlol/SkyCraft` (Skyrim + Minecraft), omgebouwd voor FNAF: Security Breach (Unreal 4.27).
-- Repo: `Mielesgames/securitybreach-minecraft-passthrough`. Lokale map heet nog `D:\Github\miside-minecraft-passthrough` (hernoemen lukt niet: `gradlew --stop` en java.exe sluiten).
-- `sb/`: UE4SS C++ mod (`dllmain.cpp`, `Link.cpp/.h`; Bridge/Player/SharedMemory zijn nog leeg).
-- `fabric/`: Minecraft 26.3 Fabric-mod (Java 25), o.a. `SkyClient.java`.
-- `protocol/skycraft_protocol.h`: shared memory. Coördinaten zijn Minecraft-ruimte.
-- `skse/`: de oorspronkelijke Skyrim-plugin, alleen als naslag (wordt niet gebouwd).
-- UE4SS komt uit de submodule `RE-UE4SS` (main-branch, geen release): de `UE4SS.dll` in de game is die uit `build\Game__Shipping__Win64\bin`.
+- Fork van `chasmlol/SkyCraft` (Skyrim + Minecraft), omgebouwd voor FNAF: Security Breach (Unreal 4.27). Repo `Mielesgames/securitybreach-minecraft-passthrough`; lokale map heet nog `D:\Github\miside-minecraft-passthrough`.
+- `sb/src/`: UE4SS C++ mod. `dllmain.cpp` (hoofdlus, besturing, slaan/gebruiken, deuren, commando's), `Link` (shared memory), `Input` (vensterberichten), `Overlay` (Present-hook, HUD), `World` (render-ring, blokken/entities tekenen), `Collision` (omgeving aftasten → hitboxes voor Minecraft), `Actors` (personages ↔ Minecraft-stand-ins).
+- `fabric/`: Minecraft 26.3 Fabric-mod (Java 25), SkyCrafts code plus een passthrough-modus (`SkyClient.PASSTHROUGH`, `SkyDig.PASSTHROUGH`, env `SKYCRAFT_PASSTHROUGH=1`).
+- `protocol/skycraft_protocol.h`: het shared-memory-protocol; de Java-kant spiegelt het in `Proto.java`. Wijzig altijd beide.
+- `skse/`: SkyCrafts Skyrim-plugin, alleen als voorbeeld (wordt niet gebouwd). `tools/crash_stack.py` leest UE4SS-crashdumps uit.
+- UE4SS komt uit de submodule `RE-UE4SS`; de `UE4SS.dll` in de game is die uit `build\Game__Shipping__Win64\bin`.
 
-## Bouwen en installeren
-- Game: `C:\Program Files (x86)\Steam\steamapps\common\Quarters\fnaf9\Binaries\Win64` (log: `UE4SS.log`, dumps: `crash_*.dmp`).
-- Bouwen (cmake staat niet in PATH, die van Visual Studio 18 gebruiken):
-  `cmake --build build --config Game__Shipping__Win64 --target SecurityBreachMinecraftPassthrough`
-- Installeren: `build\sb\Game__Shipping__Win64\SecurityBreachMinecraftPassthrough.dll` kopiëren naar `Mods\SecurityBreachMinecraftPassthrough\dlls\main.dll` (moet `main.dll` heten).
-- De DLL start Minecraft via `gradlew runClient` (pad overschrijfbaar met `SBMP_FABRIC_DIR`) en zet `SKYCRAFT_PASSTHROUGH=1`.
-- Claude kan de game niet zelf draaien: elke wijziging aan `sb/` is pas getest als jij hem in de game hebt geprobeerd.
+## Bouwen, installeren, testen
+- Game: `C:\Program Files (x86)\Steam\steamapps\common\Quarters\fnaf9\Binaries\Win64` (log `UE4SS.log`, dumps `crash_*.dmp`). Moet met Steam-startoptie **`-dx11`** draaien: onder DX12 tekent de mod niets.
+- Mod bouwen (cmake staat niet in PATH): `"C:/Program Files/Microsoft Visual Studio/18/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe" --build build --config Game__Shipping__Win64 --target SecurityBreachMinecraftPassthrough`
+- Installeren: `build\sb\Game__Shipping__Win64\SecurityBreachMinecraftPassthrough.dll` → `Mods\SecurityBreachMinecraftPassthrough\dlls\main.dll`. Draait het spel, dan zit het bestand vast: wacht in de achtergrond tot `fnaf9-Win64-Shipping` weg is en kopieer dan.
+- Java controleren: `fabric\gradlew compileJava compileClientJava`. De mod start Minecraft zelf met `gradlew runClient` (pad: `SBMP_FABRIC_DIR`), dus Java-wijzigingen gaan mee bij de volgende start van het spel. Minecraft-log: `fabric/run/logs/latest.log`.
+- Claude kan het spel niet draaien: alles is pas getest als de gebruiker het geprobeerd heeft. Logregels van de mod beginnen met `SBMP`; zet bij nieuwe dingen een logregel die laat zien wat er gebeurde.
+- Schrijfstijl in de code: korte Engelse commentaren die zeggen waarom, net als de rest.
 
-## Hoe de mod werkt
-- Alles wat Unreal-objecten aanraakt draait op de game-thread via `RegisterEngineTickPreCallback` (`on_unreal_init`). **Niet in `on_update`**: dat is UE4SS' eigen thread.
-- Controller `MainGamePC_C` wordt gezocht met `FindAllOf` en daarna via een `FWeakObjectPtr` hergebruikt. Offsets: `+0x6F0` FirstPersonCharacter (Gregory), `+0x290` ControlRotation.
-- F6 = Minecraft-modus aan/uit, F7 = noodstop, watchdog (3 s zonder Minecraft-frames → uit).
-- Bij F6 vraagt de mod Minecraft om naar Gregory te teleporteren (`teleportSeq`). Gregory wordt pas weer verplaatst als Minecraft dat bevestigd heeft (`teleportAck`) én binnen 35 eenheden van hem staat (`driving`). Een sprong van meer dan 210 eenheden in één frame → opnieuw synchroniseren in plaats van volgen.
-- Minecraft bepaalt alleen X/Z; de hoogte blijft die van Unreal. Game-WASD staat uit via `Controller:SetIgnoreMoveInput` (dat is een teller: één keer per wissel aanroepen).
-- Mapping: `kUnitsPerBlock` = 70, `kZSign = +1.0`, yaw = `kZSign * yaw - 90`.
-- Minecraft-kant: passthrough-modus in `SkyClient` (geen `holdUntilReady`, Y vastgezet op Gregory's hoogte).
+## Hoe het werkt
+- **Threads:** alles wat Unreal-objecten aanraakt draait op de game-thread via `RegisterEngineTickPreCallback` (en een post-callback voor `hold_flipped`). Nooit in `on_update` (UE4SS' eigen thread; dat gaf de crash van 8 okt). Tekenen gebeurt op de Present-thread.
+- **Speler:** controller `MainGamePC_C` (`FindAllOf` + `FWeakObjectPtr`); personage = `controller+0x6F0`, anders de `Pawn` van de controller (na New Game is `0x6F0` leeg). `+0x290` = ControlRotation.
+- **Assen:** Unreal X = Minecraft x·70, Unreal Y = Minecraft z·70, Unreal Z = Minecraft y·70. Minecraft rekent vanaf de voeten, Unreal vanaf het midden van de capsule (`CapsuleHalfHeight`).
+- **Wie beweegt:** `SkyState.flags` met `kSkyHostDrives` = het spel beweegt Gregory, Minecrafts speler is vastgepind. Zonder die vlag (F6 aan) draait Minecraft zijn gewone physics; de mod zet Gregory elke frame op Minecrafts positie (teleport, `CharacterMovement` op `MOVE_Flying`), verschoven zodat de camera op Minecrafts ooghoogte staat. Gregory is dan verborgen.
+- **Starten na F6:** teleport-verzoek (`teleportSeq`), Gregory beweegt pas als Minecraft het bevestigt (`teleportAck`) en dichtbij staat. Verschil > 700 eenheden = het spel heeft Gregory verplaatst → Minecraft wordt op hem gezet (`SBMP drift`).
+- **Hitboxes** (`Collision.cpp`): box-traces met profiel `Pawn` rond de speler (3×3×3 regio's van 8³ blokken, cellen van een kwart blok, exacte vloerhoogte via een line-trace), als `kColTris`/`kColRegion` naar Minecraft. Andere pawns worden overgeslagen. Deuren van het spel die open/dicht gaan → regio's meteen opnieuw (`collision::invalidate`).
+- **Beeld** (`Overlay.cpp`, `World.cpp`): Present-hook; Minecrafts HUD/hand als overlay; blokken, entities, Steve (F5), pijlen/items/scheuren/omlijning als 3D, met de dieptebuffer van het spel (gevonden via hooks op `ClearDepthStencilView`/`OMSetRenderTargets`). De render-ring moet elke frame leeggelezen worden, anders loopt Minecraft vast.
+- **Invoer** (`Input.cpp`): de mod zit vóór de message-handler van het spelvenster. In Minecraft-modus gaan toetsen/muis naar Minecraft en niet naar het spel; uitzondering Escape buiten een Minecraft-scherm (pauzemenu). In een Minecraft-scherm wordt ruwe muisbeweging de cursor. Pauze van het spel geeft alles terug.
+- **Personages** (`Actors.cpp`): alle `Pawn`s binnen 48 blokken in de `ActorTable` (Minecraft houdt stand-ins bij die drukplaten indrukken en geraakt kunnen worden; niet-Freddy is `kActorHostile`). Wie in een Minecraft-blok of een deur/hek-vorm (`kRenShapes`) staat wordt eruit geduwd; in vuur/lava/magma krijgt hij een klap.
+- **Events uit Minecraft** (`handle_events`, altijd gelezen): klappen op stand-ins, explosies, chatcommando's, redstone.
+- **Rechtermuisknop:** papiertje van een gebroken object → terugzetten; Dinnerbone/Grumm-kaartje → personage ondersteboven; Minecraft-blok onder het vizier → naar Minecraft; anders deur (forceer open/dicht, slot eraf, tenzij gamerule `skycraft:allow_opening_doors` uit staat) of de interactie van het spel (`OnPlayerInteract`, vasthoud-interacties direct afgemaakt).
+- **Linkermuisknop:** gaat naar Minecraft; de mod slaat daarnaast personages weg (stun + `LaunchCharacter`, bots worden geschoven), losse physics-objecten weg (`AddImpulse`), en breekt cutouts (naam bevat cutout/standee/cardboard) en deuren: creative één slag (niet met een zwaard), survival vasthouden. Gebroken = verborgen + zonder collision, Minecraft laat een papiertje met de naam vallen.
+- **Middelste muisknop (creative):** pakt een personage of los object vast en draagt het voor de camera.
+- **Commando's** (servercommando's, met autofill): `/<naam>`, `/tp <naam>`, `/summon <naam>` voor freddy, chica, monty, roxy, vanny, vanessa, moon, sun, bot, endo, musicman. Summon laadt een eerder ontmoet personage uit de spelbestanden (`characters.txt` naast de mod).
+- **Minecraft-kant voor Security Breach:** altijd nacht, mobs kunnen paden over de vloer van het spel vinden, ijzeren golems vallen stand-ins aan, stand-ins (niet Freddy) verwonden villagers, explosies slopen de vloer van het spel niet, geen omlijning op de wereld van het spel, F5 via `ClientSetCameraMode("FreeCam")`.
 
-## De crash van 8 oktober (opgelost in code, nog niet in de game getest)
-- Alle 11 dumps zijn dezelfde crash: schrijven naar `0x98` in memcpy, direct na F6, tijdens de eerste `K2_SetActorLocation`.
-- Wat er gebeurde: de verplaatsing liet een Blueprint-event afgaan op een object in het level (overlap-achtig event met een hit-result), dat een interface-event aanriep op een ander object zonder "persistent ubergraph frame" → schrijven naar null+0x98. Welke Blueprints het zijn is niet te zien: de namen staan niet in de dump.
-- Twee dingen die de mod fout deed en die nu anders zijn:
-  1. De aanroep kwam van UE4SS' eigen thread (`on_update`), niet van de game-thread.
-  2. Na F6 volgde Gregory meteen Minecrafts oude positie, waardoor hij elke keer ~2,6 m terugsprong naar het punt waar de save laadde.
-- Niet bewezen welke van de twee de crash gaf. Als hij terugkomt: `tools/crash_stack.py` op de nieuwe dump.
-- De hit-buffer deed er niet toe: UE4SS' `K2_SetActorLocation` gebruikt `SweepHitResult` niet (`FHitResult` is daar een lege struct).
+## Getest en werkend (12 okt)
+Lopen, springen, vliegen, muren/ramps, blokken plaatsen en erop staan, ramen; HUD, blokken, entities, dieptebuffer, night vision, F5 van achteren; E/inventory/scrollen/slaan; deuren openen en slopen (ook survival), cutouts slopen, save- en oplaadstation, verzamelobjecten; Freddy en bots wegslaan, golems slaan animatronics; `/freddy`; Dinnerbone draait om (zakte in de grond, aangepast); Freddy botst tegen blokken en pistons.
 
-## Stand na de test van 12 oktober
-- Lopen werkt en de crash is weg (game-thread + wachten op `teleportAck`).
-- "Bevriezen" was de E-toets: die opende Minecrafts inventory, en met een scherm open staat de Minecraft-speler stil. E wordt niet meer doorgestuurd, en een open Minecraft-scherm (`kMcScreenOpen`) wordt met Escape gesloten.
-- F6 wordt genegeerd zolang Minecraft nog niet in zijn wereld is (opstarten duurt ~40 s).
-- Muren: `kSweepWalls` staat aan. Per frame: vlakke sweep → bij blokkade 45 omhoog, vooruit, weer omlaag (trap/helling) → anders per as langs de muur schuiven → bij meer dan 20 eenheden verschil Minecraft terugzetten op Gregory. **Nog niet in de game getest.** Verwacht: schuiven langs muren is schokkerig, omdat elke sync Minecrafts speler even stilzet.
+## Gebouwd maar nog niet getest
+F5 vooraanzicht; `/summon` met laden uit bestanden (een tweede Freddy wordt wel aangemaakt maar is onzichtbaar, oorzaak onbekend); deuren-val met Minecraft-deur (werkte niet; diagnose-logregels `has … boxes` / `held back by a door`); onzichtbare barrière na openen van een spel-deur; doorlopen na het laden van een zone; redstone opent deuren; lava/vuur; Dinnerbone niet meer in de grond; gamerule `allow_opening_doors`; papiertje bij breken en terugzetten; vastpakken met de middelste knop; villagers aangevallen; mobs die lopen (golems draaien soms rondjes); TNT-kettingreactie; pijlen.
 
-- Muren en ramps zijn door jou getest en werken. Stilvallen bij een muur komt van "Gregory was blocked"-syncs; of Minecraft daarnaast zelf hapert, logt de mod nu als `SBMP Minecraft hitch`.
-- Intro na New Game (Gregory in Freddy): `controller+0x6F0` is dan null. De mod stuurde toen geen heartbeat, dus Minecraft bleef op zijn beginscherm. Nu gaat de heartbeat elke tick, ook zonder Gregory; lopen kan pas als Gregory er is. **Nog niet getest.**
+## Stand 13 okt
+- Werkt: breken geeft een papiertje, terugzetten werkt.
+- Aangepast, nog niet getest: een papiertje kan nu vaker gebruikt worden (de eerste keer komt het origineel terug, daarna een kopie van dezelfde klasse met dezelfde mesh; in survival is het papiertje na één keer op). Verstopplekken: zolang Gregory `IsHiding` of `Hide/UnhideTransitionActive` heeft, gaat Minecraft-modus uit (het spel bestuurt hem, E om eruit te gaan werkt) en daarna vanzelf weer aan. Een te vroege F6 wordt onthouden tot Minecraft klaar is.
+- Gamerule: geen autofill gezien. De volledige naam is `skycraft:allow_opening_doors`; niet nagegaan of hij in de lijst van `/gamerule` staat.
 
-- New Game, tweede test: met alleen een heartbeat viel Steve de void in en bleef doodgaan, want Minecrafts passthrough-modus deed niets zolang de host niet "in game" was. `SkyClient.passthroughPhysics` parkeert de speler nu zolang er geen host-speler is, en laat hem meteen respawnen als hij toch doodgaat.
-- Na New Game blijft `controller+0x6F0` leeg, ook na de intro. De mod valt dan terug op de `Pawn` van de controller (via reflectie). Getest: tijdens de intro is de pawn `Freddy_C`, daarna `Gregory_C`, en lopen werkt. Steve valt niet meer.
-- Java-wijzigingen controleren met `fabric\gradlew compileClientJava` (kan alleen als Minecraft niet draait).
+- F6 op het laadscherm liet het spel twee seconden later afsluiten. Minecraft-modus start nu pas als het spel speelbaar is: `Controller:IsMoveInputIgnored` onwaar en niet gepauzeerd, een seconde lang (`game_playable`). Nog niet getest; als F6 hierdoor nooit meer aan gaat, ligt het aan deze voorwaarde.
+- **Freddy als muildier (gebouwd, nog niet getest):** rechtermuisknop op Freddy → `kInMountFreddy` → `FreddyMount.mount` zet de speler op een onzichtbaar, stil, tam muildier met de naam "Freddy" (naam = herkenning aan beide kanten; tags bereiken de client niet). Zolang niemand erop zit, blijft het muildier op Freddy's stand-in staan. Rijdt de speler (`kMcRidingHost`), dan houdt `update_ride` Freddy onder hem (`MOVE_Flying`, draait mee met de kijkrichting; zithoogte één keer gemeten bij het opstappen). `AbstractHorseMixin` zet de zitplaats 0,9 blok hoger. Sturen vraagt een zadel, zoals bij elk muildier; E tijdens het rijden opent zijn inventaris (zadel, kist).
 
-## Minecraft in beeld (stap 1: overlay, nog niet getest)
-- `sb/src/Overlay.cpp` is een port van `skse/src/Overlay.cpp`: hookt `IDXGISwapChain::Present` (vtable via een wegwerp-swapchain) en tekent Minecrafts beeld (hand, HUD, schermen, doorzichtige achtergrond) over het frame. Alleen D3D11, alleen op het `UnrealWindow`-venster, alleen in Minecraft-modus.
-- Minecraft levert die beelden al via `FrameExporter` (overlay-triplebuffer in shared memory); de mod geeft de echte back-buffer-grootte door als viewport.
-- De game draait standaard op **DirectX 12**; dan wordt er niets getekend. Met de Steam-startoptie `-dx11` werkt de overlay (getest 12 okt: hand en HUD zichtbaar). Al SkyCrafts rendercode is D3D11, dus `-dx11` blijft nodig.
-- Nog niet: blokken en de wereld van Minecraft in de 3D-scène, en Steve's lichaam (F5). Voorbeeld: `skse/src/WorldRender.cpp` (3400 regels).
+- Getest 13 okt: opstappen op Freddy werkt en zijn muildier-scherm (zadel, kist, 15 vakken) opent. Het muildier was zichtbaar (nu blijvend onzichtbaarheidseffect, standaard zadel en kist) en na 3 s stapte je vanzelf af doordat het val-vangnet rijden niet als "ondersteund" zag (aangepast; gaf ook de wegspringende camera). Het muildier wordt niet meer naar het spel gestuurd om te tekenen (`AvatarExporter`), anders zweven zadel en kist in Freddy.
+- **Gebouwd 13 okt, nog niet getest:**
+  - Vliegende Freddy: een dispenser kan een elytra op Freddy's muildier zetten (`AbstractHorseMixin`, borstvak); met die elytra vliegt hij tijdens het rijden (`SkyClient.flyFreddy`: Space omhoog, sprinttoets omlaag, vooruit = kijkrichting).
+  - Leash: rechtermuisknop met een lead op een personage zet het aan de lijn of haalt het eraf (`kMcHoldsLead`, `update_leads`): verder dan 6 blokken wordt het meegetrokken (getest: werkt; het touw wordt nu getekend via `world::set_ropes`, nog niet getest), met sweep; vlieg je erboven dan hangt het eraan.
+  - Boot/minecart: een stand-in die een leeg voertuig raakt stapt erin; Minecraft meldt dan elke tick waar het is (`kEvActorAt`) en de mod houdt het personage daar (`hold_captive`), tot het voertuig weg is.
 
-## Invoer (`sb/src/Input.cpp`, nog niet getest)
-- De mod zit vóór de message-handler van het gamevenster (`SetWindowLongPtr(GWLP_WNDPROC)`), dus op de game-thread. In Minecraft-modus gaan toetsen, muisknoppen en het scrollwiel naar Minecraft en ziet de game ze niet.
-- Uitzonderingen: Space gaat naar allebei (springen is nog van Unreal), Escape buiten een Minecraft-scherm is het pauzemenu van de game, F5/F6/F7/F11 gaan niet naar Minecraft.
-- Minecraft-scherm open (`kMcScreenOpen`): ruwe muisbeweging (`WM_INPUT`) wordt Minecrafts cursor (`kInCursor`, getekend door de overlay), de camera van de game draait dan niet, en getypte tekens gaan mee (`kInText`).
-- Crouch: Gregory's crouch volgt Minecrafts sneak (Shift) via `Character:Crouch`/`UnCrouch`.
-- Test 12 okt: E, scrollen en slaan werken. Niet goed: rondkijken werkte niet meer en de cursor in de inventory bewoog niet. Vermoeden (niet bewezen): de game had de muis niet "gevangen" en de mod slikte de klik in waarmee de game hem weer vangt. Nu gaat een klik ook naar de game zolang `GetCapture()` niet het gamevenster is, en zonder ruwe muisbeweging gebruikt de cursor `WM_MOUSEMOVE`. Elke 5 s logt de mod `SBMP input: raw moves …, plain moves …, game has the mouse: …`.
+- **Verstopplekken als zitplaats (gebouwd 13 okt, nog niet getest):** het spel bestuurt Gregory nog steeds terwijl hij verstopt zit (`back_after_hiding`), maar HUD en invoer blijven van Minecraft. Zodra hij binnen is stuurt de mod `kInHide`; `HidingSeat` zet Steve op een onzichtbare armor stand (vlag `kMcHiding`). Stapt hij af (Shift), dan roept de mod Gregory's `LeaveHidingSpace` aan. Komt de zitplaats niet binnen 1,5 s, dan telt Shift zelf. De E van het spel bereikt het spel dan niet meer. Logregels: `SBMP hiding: …`.
+- **Crash 13 okt 22:13** (één keer, 5 s na het starten, nog in het menu): leesfout op `0x18` in een werkthread van de Nvidia-driver (`nvwgf2umx.dll`), geen code van de mod op de stack. Oorzaak onbekend; als hij terugkomt de dumps vergelijken.
+- **Testuitslagen 13 okt (avond):** F6 op het laadscherm werkt, F5 werkt, lava lanceert animatronics omhoog. Leash: geen effect gezien (er wordt geen touw getekend en het log van die sessie is weg, dus onbekend of de klik aankwam).
+- **Prioriteiten van de gebruiker (13 okt):** 1 verstopplekken (gebouwd), 2 Shift = sluipen in het spel, 3 ventilatieschachten met trapdoor, 4 water/bubbelkolommen, 5 animatronic in een emmer, 6 fijnere hitboxes, 7 wat animatronics zeggen in de chat.
+- Sluipen (prioriteit 2), bevinding: Gregory heeft geen eigen sluip-vlag; het spel gebruikt vermoedelijk Unreals `bIsCrouched`, en `Crouch()` pakt niet zolang zijn beweging op `MOVE_Flying` staat. Niet uitgezocht wat de sluipscènes precies controleren (geluid van voetstappen of de crouch-vlag).
 
-- Test daarna: rondkijken, inventory-cursor en vliegen werken. Het log toont dat de game de muis als ruwe beweging (`WM_INPUT`) leest en de muis vast had.
-- Echte muisaanwijzer liep naar het tweede scherm terwijl een Minecraft-scherm open was: de game zag de muis dan niet en zette de verborgen aanwijzer niet meer in het midden. De mod doet dat nu zelf (`SetCursorPos`) bij elke ruwe beweging. Nog niet getest.
+- **Leash aan een hek (gebouwd 13 okt, nog niet getest):** rechtermuisknop op een Minecraft-hek (`UseBlockCallback` → `kEvLeadPost`) bindt de leads die je vasthoudt aan dat hek; heb je er geen vast, dan komen de leads van dat hek weer in je hand. Een lead is nu 6 blokken (`kLeadLength` = 420).
 
-## Minecrafts wereld in beeld (`sb/src/World.cpp`)
-- Getest 12 okt: geplaatste blokken staan goed in de wereld (plek, vorm, texturen).
-- De Present-thread leest de render-ring uit (`world::consume`, elke frame, ook als er niets getekend wordt: een volle ring laat Minecraft ~1,4 s per frame wachten). Verwerkt: `kRenAtlas`, `kRenAtlasRegion`, `kRenSection`, `kRenClearAll`, `kRenTexture`, `kRenScene` (entities en particles, elke frame opnieuw). Nog niet: `kRenAvatar` (Steve's lichaam, F5), lichten.
-- Tekenen gebeurt over het afgewerkte frame, vóór de HUD-overlay, met een eigen dieptebuffer (reversed-Z zoals Unreal).
-- **Diepte van de game (nog niet getest):** de mod hookt `ID3D11DeviceContext::ClearDepthStencilView` (vtable-index 53) en onthoudt per frame de grootste dieptebuffer met de vorm van de back buffer die de game wist (bij gelijke grootte de eerste). De pixelshader leest die en gooit pixels weg die achter de geometrie van de game liggen. Aannames: near plane 10 (`kNearPlane`), en de dieptebuffer beslaat het hele beeld. Het log zegt `SBMP world: using the game's depth buffer, …`.
-- Camera: de game-thread vraagt elke tick `GetCameraLocation`/`GetCameraRotation`/`GetFOVAngle` aan de `PlayerCameraManager` (`world::set_camera`). Dat loopt een frame achter op wat getekend is.
-- Assen: Unreal X = Minecraft x·70, Unreal Y = Minecraft z·70, Unreal Z = Minecraft y·70.
-- Hoogte: Minecrafts positie is de voeten, die van Unreal het midden van de capsule. De mod trekt daarom `CapsuleHalfHeight` af (en telt hem er bij vliegen weer bij op).
-- De event-ring (klappen, dood, explosies) wordt nog weggegooid (`discard_unused_rings`).
-- Pauzemenu van de game (`GameplayStatics:IsGamePaused`): dan tekent de mod niets en gaat alle invoer weer naar de game. Nog niet getest.
+## Ronde van 13 okt, laat (alles gebouwd, niets getest)
+- **Hekken en standbeelden slopen:** `is_fence` / `is_statue` herkennen ze aan woorden in de naam van de actor of zijn mesh (fence, railing, barrier, stanchion, statue, sculpture, mannequin; een gok, net als bij cutouts). `is_loose_prop` beschermt het gebouw: namen met merged/floor/wall/ceiling/collider/stair en alles groter dan ~14 blokken worden nooit gebroken. Hek 8 slagen, standbeeld 15 (survival).
+- **Animatronic in een emmer:** rechtermuisknop met een wateremmer op een personage (`kMcHoldsBucket`, alleen als gamerule `skycraft:allow_animatronic_water_bucket` aan staat) → `take_away(..., true)`: verborgen, geen collision, tick uit, `MOVE_None`, geen stand-in (`actors::ignore`). De emmer wordt "Bucket of <naam>" (`kInBucketToken`, `SkyCraft.tokenBucket`, gewone wateremmer met glinstering). Rechtermuisknop ermee zet hem terug (`put_back`); survival: emmer wordt weer water, creative: emmer blijft en maakt daarna kopieën. Zo'n emmer gaat nooit naar Minecraft (zou water plaatsen en het personage kwijt zijn).
+- **Water, bubbelkolommen, slime, villagers:** `SkyCombat.surroundings` kijkt per stand-in en stuurt `kEvActorPush` (blokken per tick). Water: stroomrichting × 0,12. Bubbelkolom: +0,35 omhoog of −0,2 omlaag (personage gaat tijdelijk op `MOVE_Flying`, via de `captives`-lijst). Slimeblok onder de voeten: `LaunchCharacter` omhoog (vlag 1). Vijandig personage met een villager binnen 10 blokken: loopt erheen met 0,16 blok per tick (vlag 2); de AI van het spel weet daar niets van en kan terugtrekken. Honingblokken: niet gebouwd.
+- **Vleugels:** een dispenser kan een elytra op een stand-in zetten (gewone `LivingEntity`, geen mixin nodig; niet getest of de dispenser hem accepteert). `kEvActorWings` → `set_wings` / `update_wings`: Freddy zweeft als een allay om de speler, de rest cirkelt als phantom op 6 blokken hoogte en duikt elke ~8 s. Vleugels eraf halen kan nog niet (het stand-in heeft geen scherm); ze vervallen als het stand-in verdwijnt.
+- **Chat:** `update_subtitles` leest twee keer per seconde de ondertitel-widgets van het spel (`WI_Subtitles_C`: `P_Lines`, `P_Source`, `P_Time`, rauw uitgelezen als FString/TArray) en stuurt nieuwe regels naar Minecrafts chat (`kInChatText` + `kInChatSay`). Logregel `SBMP said: …`. Werkt alleen als de ondertitels van het spel aan staan; of `P_Source` de naam van de spreker is, is een aanname.
+- **Ventilatieschachten:** niets voor gebouwd. Minecraft gaat vanzelf kruipen als de speler niet rechtop past, en de collision van het spel telt daarbij mee; de trapdoor-truc zou dus al moeten werken. Te testen.
+- **Fijnere hitboxes:** bewust niet gedaan zonder dat er tussendoor getest kan worden (raakt lopen, deuren en de belasting van het aftasten).
 
-## Vliegen (getest: werkt)
-- Minecraft vliegt (`kMcFlying`: creative of spectator) → Minecraft bepaalt ook de hoogte. `SkyClient.passthroughPhysics` zet Y dan niet meer vast, en de mod zet Gregory's `CharacterMovement` op `MOVE_Flying` en beweegt hem in 3D (sweep, per as schuiven).
-- Spectator (`kMcSpectator`, nieuwe vlag in het protocol) gaat zonder sweep, dus door muren.
-- Stopt Minecraft met vliegen, dan gaat Gregory naar `MOVE_Falling` en volgt Minecraft zijn hoogte weer.
+- **Middelste muisknop (creative):** kort klikken = oppakken zoals Minecrafts pick block (`pick_target`, `kInPickToken`): een personage geeft een spawn-ei ("<naam> Spawn Egg", voorlopig het ijsbeer-ei), iets breekbaars geeft zijn papiertje; het origineel blijft staan en het item maakt kopieën. Langer dan 250 ms vasthouden = dragen, zoals voorheen. Kopieën van personages lopen via `spawn_actor`, dat bij `/summon freddy` een onzichtbare Freddy gaf: zelfde risico.
+- **"Kan niet lopen" en een paardensprongbalk bij het opstarten:** de speler was op Freddy's muildier (of een verstop-zitplaats) uitgelogd en kwam er zittend weer op terug. Bij het inloggen wordt hij er nu afgehaald (`SkyCraft` JOIN), en `update_ride` zoekt Freddy opnieuw op als de mod niet meer weet wie het was.
+- **Minecraft-crash 22:34 (`NoClassDefFoundError: SkyRay`) was Claude's fout:** `gradlew compileJava` gedraaid terwijl Minecraft liep; die laadt zijn klassen pas als hij ze nodig heeft, uit dezelfde map die de compiler herschrijft. **Nooit Java compileren terwijl Minecraft draait** (eerst `tasklist` op `fnaf9-Win64-Shipping` controleren; een losse `java.exe` kan de gradle-daemon zijn).
 
-## Deuren, slaan en ooghoogte (in `dllmain.cpp`, nog niet getest)
-- Rechtermuisknop buiten een Minecraft-scherm wordt door `Input.cpp` vastgehouden tot de game-tick beslist: richt Minecraft op een eigen blok (`WorldEntities.hasSelection`), dan gaat de klik naar Minecraft. Anders traceert de mod 315 eenheden vanuit de camera. Heeft de geraakte actor `ForceDoorOpen`/`ForceDoorClose` (`BP_DoorMaster_C`), dan wisselt de deur (ook als hij op slot zit). Heeft hij `OnPlayerInteract` (de `InteractibleInterface` van het spel), dan wordt dat aangeroepen. Anders gaat de klik alsnog naar Minecraft.
-- Linkermuisknop gaat altijd naar Minecraft; daarnaast zoekt de mod met een dikke trace (210 eenheden) een `Character` voor je. Die krijgt `Stun()` als hij dat heeft (`StunableInterface`) en `LaunchCharacter` van je af.
-- Test 12 okt: Freddy wegslaan werkt, gewone deuren werken. Deuren met een sleutel gingen meteen weer dicht (automatische deuren: `UDoorComponent` sluit ze voor wie niet mag). De mod haalt nu eerst het slot weg (`SetLockedForPlayer(false)`, `SetSecurityLevel(0)`, `SetDoorRequiredItem(None)`, `ClearPlayerBlocker`) en zet de automaat voor de speler uit (`SetAutomaticDoorEnableForPlayer(false)`), zodat de deur blijft zoals Steve hem achterliet. Nog niet getest.
-- De schoonmaakbot was niet te raken. `CautionBot_C` is een gewone `APawn` zonder `LaunchCharacter`; zulke pawns schuift de mod nu zelf 0,3 s weg (`update_shove`, met sweep). Of dat de bot is die jij bedoelde weet ik niet: het log zegt nu ook wat een slag wél raakte (`SBMP hit: the swing only reached …`).
-- Bij gebruik van iets in de game stuurt de mod `kInSwing` (nieuw invoertype) zodat Steve's arm zwaait.
-- Het log noemt wat er geraakt of gebruikt is (`SBMP use: …`, `SBMP hit: …`): daaraan is te zien welke klassen het spel voor hekjes en personages gebruikt.
-- Ooghoogte: Gregory kan niet bukken terwijl Unreals beweging uit staat, en hij is kleiner dan Steve. De mod verschuift hem daarom verticaal zodat de camera op Minecrafts ooghoogte (`McState.eyeY`) staat; dat zakt mee bij sneaken en is de hoogte waarvandaan Minecraft mikt.
+- **"Kan niet lopen" (22:37):** de mod hield `FreddyGuideSick_C` (de zieke Freddy die Gregory voorgaat) voor de speler: `controller+0x6F0` of de `Pawn` van de controller wees naar hem (welke van de twee is niet uitgezocht). De mod verplaatste dus Freddy en Gregory stond stil. Nu: is het gekozen personage geen `Gregory…`-klasse maar kijkt de camera wel vanuit een Gregory (`Controller:GetViewTarget`), dan is dat de speler (logregel `SBMP the controller points at …`). Nog niet getest. De intro (pawn `Freddy_C`, camera ook in Freddy) blijft zoals hij was.
+- `/summon freddy` koos `FreddyEnterExitPawn_C` (een hulp-pawn van het spel met "freddy" in de naam). De naamzoeker in `host_command` moet zulke klassen overslaan; nog niet aangepast.
 
-## Personages en Minecraft-blokken (`sb/src/Actors.cpp`, nog niet getest)
-- Elke seconde zoekt de mod alle `Pawn`s (`FindAllOf`), en schrijft die binnen 48 blokken elke tick in de `ActorTable`. Minecraft (SkyCrafts `SkyCombat`/`ProxySync`) houdt op elke positie een onzichtbare stand-in-entity; die drukt drukplaten in.
-- Minecraft stuurt per sectie welke blokken vast zijn (`kRenSolids`); `World.cpp` bewaart die (`world::solid_at`). Staat een personage in zo'n blok, dan duwt de mod het er horizontaal weer uit (`push_out_of_blocks`), zodat een ijzeren deur of muur het tegenhoudt. De AI weet niets van de blokken en blijft er dus tegenaan lopen.
-- Klappen op een stand-in komen als `kEvHitActor` terug, maar de event-ring wordt nog weggegooid; slaan loopt via de eigen trace van de mod.
+- **Test 22:40:** de chat werkt voor de lift-intercom (`<Elevator Intercom> …`), maar elke regel kwam meerdere keren (het widget schuift zijn regels door) en regels van animatronics (Chica) kwamen niet. Nu gaat per widget alleen een regel door die er de vorige keer niet stond, en als `P_Lines` leeg is wordt `P_LineStrings` gelezen. Of het spel voor Chica's zinnen zelf een ondertitel toont is niet bekend; `SBMP subtitles: N widgets, M with text` (elke 10 s) laat zien of er iets te lezen viel. Nog niet getest.
+- **Test 22:40:** kopieën maken werkt volgens het log (`made a copy of StaffBotPartyPass_C`, `FreddyGuideSick_C`; `/summon chica` laadde `ChicaStandard_C` uit de spelbestanden en een gespawnde Chica kon aan de leash).
 
-## Toegevoegd op verzoek, allemaal nog niet getest
-- **F5:** F5 gaat naar Minecraft. `World.cpp` tekent Steve's lichaam (`kRenAvatar`, relatief aan Minecrafts voeten, `world::set_player_position`); dat werkt (getest). De eerste poging voor de camera (Gregory's `FirstPersonCamera` verplaatsen) deed niets: je keek in Steve's hoofd, waarschijnlijk omdat Gregory zijn camera elke frame terugzet. Nu zet de mod de `PlayerCameraManager` op `CameraStyle = FreeCam` met `FreeCamDistance` = Minecrafts camera-afstand en `FreeCamOffset.z` op Minecrafts ooghoogte; bij terugkeer `Default`. Nog niet getest. Gregory zelf is verborgen (`SetActorHiddenInGame`) zolang Minecraft rijdt.
-- **Events uit Minecraft** (`SecurityBreachLink::read_event`, `handle_events`): `kEvHitActor` (klap op een stand-in: wapens, pijlen, golems, vuur) en `kEvExplosion` (TNT, creepers) gooien de betreffende personages weg (`hit_character`). Een klap die de eigen slag-trace van de mod al gaf wordt 400 ms genegeerd.
-- **IJzeren golems** vallen de stand-ins aan (`IronGolemMixin`, in `skycraft.mixins.json`).
-- **Night vision:** nieuwe vlag `kMcNightVision`; de mod maakt het afgewerkte beeld van de game lichter (×4 plus een bodem) en belicht Minecrafts eigen dingen volledig. Het is geen echt licht: wat in het beeld helemaal zwart is blijft vlak.
-- **Doel van het project (jouw woorden): het hele spel moet als Steve te spelen zijn.** Rechtermuisknop moet dus alles doen wat de interactietoets van het spel doet, en meteen.
-- **Vasthoud-interacties** (cadeaus, sommige schakelaars: `GetInteractibleType` geeft `Hold`) worden direct afgemaakt: na `OnPlayerInteract` roept de mod de `…PlayerInteractHoldComponent…OnHoldCompleted…`-handler van het object aan, of anders `OnCollect` (`complete_hold`). Er is ook een derde, bredere trace voor kleine dingen.
-- **Commando's in de Minecraft-chat** (`SkyCraftClient`, event `kEvCommand`, `host_command` in `dllmain.cpp`): `/freddy`, `/chica`, `/monty`, `/roxy`, `/vanny`, `/vanessa`, `/moon`, `/sun`, `/bot`, `/endo`, `/musicman` of `/tp <naam>` halen het bestaande personage naar de speler; `/summon <naam>` maakt een nieuwe (`GameplayStatics:BeginDeferredActorSpawnFromClass` + `FinishSpawningActor` + `SpawnDefaultController`). De naam wordt gezocht in de klassenamen van de pawns. Nog niet getest; of een gespawnde animatronic iets doet is onbekend.
-- **TNT-kettingreactie:** SkyCrafts `SkyDigBlast` zag de vloer van het spel als onverwoestbaar gebouw en liet die elke explosie opslokken. Voor Security Breach staat dat uit (`SkyDig.PASSTHROUGH`), dus explosies zijn weer gewoon Minecraft.
-- **Omlijning op lucht:** SkyCraft omlijnt ook de plek waar een blok zou komen als je op de wereld van het andere spel richt. Voor Security Breach uitgezet (`WorldExporter.selection`): alleen echte blokken.
-- Getest door jou: Freddy botst tegen pistons en andere blokken; de omlijning werkt op blokken.
-- **Nacht:** zombies verbrandden. In passthrough zet `SkyClient` de Minecraft-wereld elke 200 ticks op middernacht (`time set midnight` via de geïntegreerde server). `SkyState.gameHour` wordt door de Minecraft-kant niet voor de tijd gebruikt.
-- **Mobs konden niet lopen:** de collision wordt wel geïnjecteerd (ze staan op de vloer), maar de padzoeker ziet alleen lucht. `WalkNodeEvaluatorMixin` laat een cel als vast tellen als de geometrie van het spel de bovenste helft vult of als hij een vloer draagt die in de onderste helft van de cel erboven ligt. Alleen in passthrough, alleen binnen de gescande regio's (3×3×3 rond de speler). Nog niet getest.
-- **Test 12 okt, 21:50:** Minecraft start, golems lopen (draaien soms rondjes) en slaan animatronics, night vision werkt, `/freddy` werkt, rechtermuisknop werkt op save-station, oplaadstation, deuren en verzamelobjecten.
-- **F5-camera:** `CameraStyle` is geen gereflecteerde eigenschap, dus de vorige poging deed niets. Nu via `PlayerController:ClientSetCameraMode("FreeCam"/"Default")`, met `FreeCamDistance`/`FreeCamOffset` (die bestaan wel). Nog niet getest.
-- **Dubbele interacties:** bij vasthoud-objecten startte de mod het vasthouden én maakte het af, waarna de timer van het spel het nog eens afmaakte. Nu wordt alleen het afmaken aangeroepen. Nog niet getest; of dit alle dubbele gevallen dekt is onbekend.
-- **`/summon <naam>` en `/tp <naam>`** zijn nu echte client-commando's (met autofill) in plaats van onderschepte chatregels; de onderschepping kwam bij `/summon` niet aan. Nog niet getest.
-- **Losse voorwerpen wegslaan:** raakt de slag een component dat physics simuleert (`IsSimulatingPhysics`), dan krijgt het `AddImpulse` als snelheidsverandering (`hit_loose_object`). Nog niet getest.
-- **Test 12 okt, later:** F5 van achteren werkt, dubbele interacties zijn weg, `/freddy` werkt.
-- **F5 vooraanzicht** (cameraMode 2): de mod stuurt Minecraft dan de omgekeerde kijkrichting (yaw + 180, pitch omgekeerd), zodat de FreeCam-camera vóór Steve komt en terugkijkt. Nog niet getest; slaan en gebruiken mikken in die stand nog langs de camera in plaats van langs Steve's blik.
-- **Commando's met autofill:** verplaatst naar de server (`SkyCraft.onInitialize`, `CommandRegistrationCallback`): `/<naam>`, `/teleport <naam>` (dus ook `/tp`, dat alleen doorverwijst) en `/summon <naam>` als extra takken van Minecrafts eigen commando's. Nog niet getest.
-- **Dingen van het spel slopen door te slaan:** cutouts (herkend aan `cutout`/`standee`/`cardboard` in de naam van de actor of zijn mesh; er is geen eigen klasse voor gevonden, dus dit is een gok) en deuren. Creative: één slag, behalve met een zwaard (dan niets, vlag `kMcHoldsSword`). Survival: 5 slagen voor een cutout, 12 voor een deur; de telling begint opnieuw bij een ander doel of na 3 s. Bij het breken `K2_DestroyActor`, plus Minecrafts breek-particles en -geluid (`kInBreakEffect`). Nog niet getest.
-- **Gebruiken:** naast de pawn-trace een tweede trace op het zichtbaarheidskanaal (`collision::trace_visible`), voor dingen waar je doorheen kunt lopen (knoppen).
-- **Pijlen, gedropte items, drietanden, breekscheuren en de omlijning van het blok waar je op richt:** `World.cpp` leest elke frame `WorldEntities` (seqlock) en bouwt er driehoeken en lijnen van (`build_dynamic`, overgenomen uit `skse/src/WorldRender.cpp`).
-- **Krappe deuren:** de muren komen afgerond op kwart blokken binnen, dus elke deuropening is tot een kwart blok per kant smaller. Steve botst daarom met een smallere romp (straal 0,18 in plaats van 0,3, `SkyCollider`).
+- **Chat, derde poging (nog niet getest):** het spel toont Chica's zinnen wel onderin beeld, dus de mod las op de verkeerde plek. `update_subtitles` leest nu eerst wat er echt op het scherm staat: `RichText` van het widget via `RichTextBlock:GetText` + `KismetTextLibrary:Conv_TextToString` (alleen omgezet als de tekst opnieuw gezet is), en pas daarna `P_Lines` / `P_LineStrings`.
+- **Eén Freddy tegelijk:** kopieën van Chica, StaffBots en objecten werken; van Freddy blijft er maar één zichtbaar (gemeld door de gebruiker; het log zegt wel `made a copy of FreddyGuideSick_C`). Vermoedelijk regelt het spel dat zelf; niet uitgezocht. `/summon` slaat `FreddyEnterExitPawn` nu over.
+- **Volgende sessie (wens van de gebruiker): eigen texturen.** Freddy in een emmer, spawn-eieren per animatronic, en een algemeen "dit is een Security Breach-object"-icoon (of het echte voorwerp als plaatje). Aanpak: resource pack in de mod (`fabric/src/main/resources/assets/skycraft/…`), items krijgen hun plaatje via de `item_model`-component op de bestaande token-items (`tokenBucket`, `tokenEgg`, `tokenPaper`). De gebruiker maakt of levert de PNG's (16×16). Een plaatje van het echte object vraagt een schermopname per object; dat is handwerk of een `SceneCapture2D`.
 
-## Nog te doen
-1. Alles hierboven testen, plus deuren met sleutel, bots slaan, de armzwaai, de drukplaat-val en personages die tegen blokken botsen.
-2. Fakkels en ander Minecraft-licht het spel laten verlichten (`kRenLights` wordt nog overgeslagen).
-4. Hitboxes fijner dan een kwart blok, zodat de smallere romp niet meer nodig is.
+- **Stilstaande bots (StaffBot achter een balie, `RIG_Staffbot6`):** dat zijn `SkeletalMeshActor`s, geen pawns: geen stand-in, geen leash, emmer of spawn-ei. Een klap schuift ze nu weg (zelfde `shoved`-pad als de schoonmaakbots). Nog niet getest; als de actor niet beweegbaar is (mobility static) gebeurt er niets.
 
-## Ontwerpregel: wie bepaalt de physics
-- Minecraft-modus aan (F6) = Minecraft-physics hebben voorrang, inclusief vliegen in creative en spectator-modus.
-- Minecraft-modus uit = gewoon Security Breach, zonder iets van Minecraft in beeld of in de besturing.
+- **Test 22:51:** vleugels werken (Freddy vloog als allay, maar te dicht op de speler). Nu volgt Freddy een echte, onzichtbare Minecraft-allay (`SkyCombat.guide`: tag `skycraft_freddy_allay`, `LIKED_PLAYER` = dichtstbijzijnde speler); Minecraft meldt elke tick waar die is (`kEvActorAt`) en de mod houdt Freddy daar (bestaande `hold_captive`). Zonder allay cirkelt hij ruimer (320 eenheden). Nog niet getest.
+- **Zwevende arm van Gregory in F5:** `RIG_FazWatchHand` (de horloge-arm) bleef zichtbaar terwijl Gregory verborgen is. `hide_extras` verbergt die arm en `EquippedItem` nu elke seconde opnieuw. Nog niet getest; of dit de arm uit de schermafbeelding is, is een aanname.
+- **"Physics janky" (22:50):** niet verklaard. Het log toont 10 haperingen van Minecraft (170 tot 580 ms), vooral rond het moment dat er 10 tot 11 personages bij kwamen (9 gespawnde Chica's, 16 StaffBots).
+- **Java controleren terwijl Minecraft draait:** kopieer `fabric/` zonder `run/` en `build/` naar de scratchpad, gooi daar `.gradle/9.7.1`, `buildOutputCleanup` en `configuration-cache` weg en draai `gradlew compileJava compileClientJava` in die kopie. Zo wordt de map die Minecraft gebruikt niet aangeraakt.
 
-## Hitboxes (`sb/src/Collision.cpp`, getest 12 okt: lopen, springen en blokken op de vloer zetten werken)
-- In Minecraft-modus tast de mod de omgeving af en stuurt die als SkyCrafts collision-regio's (`kColTris` voor de speler, `kColRegion` voor mobs) door de collision-ring. Minecraft draait dan zijn gewone physics (lopen, springen, vallen, vliegen) en de mod zet Gregory elke frame op Minecrafts positie, zonder sweep, met zijn `CharacterMovement` op `MOVE_Flying` zodat Unreal hem met rust laat.
-- Aftasten: `KismetSystemLibrary:BoxTraceSingleByProfile` met profiel `Pawn` (via reflectie, geen vaste parameter-layout). Een regio is 8³ blokken; een geblokkeerde kubus wordt in achten gesplitst tot cellen van een kwart blok. Van de bovenste cel van elke stapel bepaalt een `LineTraceSingleByProfile` de exacte vloerhoogte.
-- Regio's: 3×3×3 rond de speler, dichtstbijzijnde eerst, 4 ms per tick zolang er onbekende zijn, daarna 0,6 ms; elke regio wordt na 5 s opnieuw bekeken (deuren) en alleen opnieuw verstuurd als hij veranderd is.
-- Wie rijdt staat in `SkyState.flags`: `kSkyHostDrives` (nieuw) = de game beweegt Gregory zelf en Minecrafts speler wordt op hem vastgepind (`SkyClient.passthroughPhysics`). Zonder die vlag draait Minecraft zijn normale SkyCraft-pad, inclusief `holdUntilReady` (wacht na elke teleport tot de regio's onder de speler bekend zijn).
-- Vangnet: is Minecrafts speler 3 s in de lucht zonder te vliegen, dan gaat alles terug naar de laatste plek waar hij stond.
-- Space gaat niet meer naar de game: springen is van Minecraft.
-- Andere pawns (Freddy, animatronics, bots) worden bij het aftasten overgeslagen: raakt een box-trace een actor met een `GetController`-functie, dan wordt opnieuw getraced met die actor in `ActorsToIgnore`. Nog niet getest.
-- Bekende zwakke plekken: Steve (1,8 blok hoog, 0,6 breed) is groter dan Gregory, dus lage doorgangen kunnen te krap zijn; hellingen zijn treetjes van een kwart blok breed.
-- De oude aanpak (Gregory met een sweep achter Minecraft aan, opstapje, langs muren schuiven, terugzetten bij blokkade) is hiermee vervangen en verwijderd.
+## Ronde van 13 okt, nacht (gebouwd en geïnstalleerd, niets getest)
+- **Leash is nu Minecrafts eigen lead** (wens van de gebruiker, in plaats van zelf getekend touw): rechtermuisknop met een lead op een personage → `kInLeash` → `SkyCombat.leash` zet een onzichtbare allay zonder AI op het stand-in en lijnt die aan de speler (armor stands kunnen niet aan een lead). Minecraft bindt hem zelf aan hekken (knoop) en laat hem knappen; `followLead` meldt elke tick waar het andere eind is (`kEvLeash`) en `update_leads` houdt het personage binnen 6 blokken daarvan. Een personage aan de lijn komt los met elke rechtermuisklik. Het touw wordt getekend doordat `AvatarExporter.submitLeash` nu geometrie levert (twee gekruiste linten, 24 stukken). Het eigen touw (`world::set_ropes`) en `kEvLeadPost` worden niet meer gebruikt.
+- **Spyglass:** vlag `kMcScoping`; `update_spyglass` zet de FOV van de `PlayerCameraManager` op een tiende (`SetFOV`) en geeft hem daarna vrij (`UnlockFOV`).
+- **Animatronics staan op Minecraft-blokken:** `Actors.cpp` `block_floor`: ligt er onder de voeten een blok (hooguit één blok omhoog, ruimte voor het lichaam erboven), dan wordt het personage erop gezet en vastgehouden met `MOVE_Flying` (`MaxFlySpeed` = `MaxWalkSpeed`); is het blok weg, dan `MOVE_Falling`. Gevolg: een muur van één blok hoog houdt niemand meer tegen, twee hoog wel (zoals bij mobs).
+- **Chicken jockey:** elk vijandig personage (dus niet Freddy) heeft één keer 10% kans (`JOCKEY_CHANCE`): een kip met een onzichtbare baby-zombie erop, die als een echte jockey achter de speler aan gaat; de mod houdt het personage op de kip (`kEvActorAt`). Geen zit-houding. Sterft de zombie of de kip, dan loopt het personage weer zelf.
 
-## Wensen
-- Deuren van Security Breach openen als Steve: rechtermuisknop op een deur → deur gaat open.
-- Animatronics van je af kunnen slaan als Steve.
-- Freddy berijden als een Minecraft-paard met zadel: rechtermuisknop op Freddy, daarna bestuur je hem.
+- **Explosies slopen breekbare dingen** (`break_with_blast`): 26 stralen vanuit het midden (0,6 × de klap-straal); het eerste dat elke straal raakt breekt als het breekbaar is (papiertje + breek-effect). Een muur beschermt dus wat erachter staat. Nog niet getest.
+- **Meubels en decoratie breekbaar** (`is_furniture`, 8 slagen): namen met palmtree, plant, table, chair, stool, bench, trash, sign, balloon, arcade, stroller, cone, poster, banner. Een gok op naam; bewust niet: balies, platforms, cadeaus, dozen (daar sta je op of je hebt ze nodig). `is_loose_prop` weigert nu ook platform, ramp, pillar, column, ground, roof, bridge, elevator. Nog niet getest; `SBMP hit: the swing only reached …` laat zien hoe dingen echt heten.
+
+## Wensen (nog niet gebouwd)
+- Steam-achievements van Security Breach in Minecrafts advancements-scherm (namen en omschrijvingen; icoontjes hoeven niet te kloppen). Aanpak: de lijst als advancements in een datapack in de mod; toekennen vraagt dat de mod merkt wanneer het spel een achievement geeft (nog uitzoeken waar).
+- Eigen texturen in Minecraft (resource pack in de mod), bijvoorbeeld "Freddy in een emmer" en spawn-eieren per animatronic.
+- Vastpakken met de middelste muisknop mag ook kopieën van animatronics maken, als er meerdere van dezelfde kunnen bestaan.
+- Freddy zelf tonen in het voorbeeldvak van zijn muildier-scherm (nu zie je daar alleen zadel en kist). Idee: een `SceneCapture2D` op Freddy richten en dat beeld in de overlay op de plek van het vak tekenen; de D3D11-texture van het render target moet dan via de bestaande hooks gevonden worden.
+- Fakkels en ander Minecraft-licht verlichten het spel (`kRenLights` wordt nu alleen voor gevaren gelezen).
+- Freddy als muildier verder uitwerken: zijn eigen scherm tonen, vliegen met een elytra uit een dispenser.
+- Schade in plaats van een directe jumpscare (0 hp = jumpscare), en jumpscare afweren met een schild.
+- Vliegende Freddy (lage prioriteit). Getest 13 okt: de dispenser zet de elytra op Freddy's muildier, maar vliegen doet hij niet (`SkyClient.flyFreddy` doet dus niets; oorzaak niet onderzocht). Bedoeling: Freddy met elytra gedraagt zich als een allay (zweeft vriendelijk met je mee).
+- Elytra op andere animatronics (dispenser): die gaan vliegen en je aanvallen zoals phantoms (cirkelen en duiken). Vraagt dat hun stand-ins ook een borstvak krijgen dat een dispenser kan vullen, en dat de mod het personage dan zelf door de lucht beweegt.
+- Water en bubbelkolommen die animatronics meenemen; slime- en honingblokken; gamerule `allowAnimatronicWaterBucket` (animatronic in een emmer).
+- Animatronics aan een leash; animatronics die in een minecart of boot vast komen te zitten.
+- Shift telt als sluipen in het spel (voor sluipscènes); door ventilatieschachten kruipen met een trapdoor.
+- Standaard-inventaris verder invullen (gebruiker bedenkt nog wat). Nu: SkyCrafts starter- en bouwkit plus `givePizzaplexKit` in `SkyCraft.java` (één keer per speler, tag `skycraft_pizzaplex_kit`): lava-emmer, tweede wateremmer, trapdoors, saplings, aarde, bonemeal. Eis: een oneindige cobblestone-generator moet kunnen.
+- Mogelijk: spiegelbeeld van Steve.
+- Hitboxes fijner dan een kwart blok (Steve botst nu met een smallere romp om dat te compenseren).
+- Wat animatronics zeggen (ondertitels/voice lines van het spel) ook in de Minecraft-chat tonen, als `<Freddy> …`. Nog uitzoeken waar het spel zijn ondertitels vandaan haalt.
+- Les van 13 okt: een mixin-injectie moet de klasse noemen waar de methode *gedeclareerd* is (`canUseSlot` staat in `AbstractHorse`, niet in `AbstractChestedHorse`). `compileJava` ziet dit niet; Minecraft crasht er pas bij het opstarten op. Controleren met `javap -p -cp <minecraft-common-jar> <klasse>`.

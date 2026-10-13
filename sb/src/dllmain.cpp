@@ -28,6 +28,8 @@
 #include <algorithm>
 #include <array>
 #include <exception>
+#include <fstream>
+#include <set>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -49,8 +51,11 @@ static constexpr double kZSign = 1.0;
 // All in Unreal units (70 per Minecraft block).
 // Minecraft takes over once it stands this close to Gregory after a sync.
 static constexpr double kEngageDistance = 35.0;
-// A bigger gap than this in one frame is not walking: sync again instead.
-static constexpr double kMaxStep = 210.0;
+// A bigger gap than this between where Minecraft has its player and where
+// Gregory is means the game moved him somewhere else (a door, a cutscene):
+// then the game wins and Minecraft is put on him. Anything smaller is
+// Minecraft's to win, Gregory is simply put back.
+static constexpr double kMaxStep = 700.0;
 // Minecraft's player in the air (not flying) for this long has fallen through
 // geometry Minecraft didn't know yet: put both back where it last stood.
 static constexpr ULONGLONG kMaxFallMs = 3000;
@@ -70,6 +75,58 @@ static constexpr float kKnockbackLift = 420.0f;
 // Hits it takes to break a cutout in survival, and the pause after which the count starts over.
 static constexpr int kBreakHits = 5;
 static constexpr int kDoorBreakHits = 12;
+static constexpr int kFenceBreakHits = 8;
+static constexpr int kStatueBreakHits = 15;
+// Half the size (Unreal units) above which something is part of the
+// building, not a prop that can be broken.
+static constexpr float kMaxPropExtent = 500.0f;
+// Doors: how often their state is looked at, how often the list of doors is
+// made anew, how far from the player they are watched (Unreal units), how
+// long one takes to move, and how far around it Steve's geometry is renewed
+// (blocks).
+static constexpr ULONGLONG kDoorCheckMs = 150;
+static constexpr ULONGLONG kDoorListMs = 2000;
+static constexpr double kDoorWatchRange = 1800.0;
+static constexpr ULONGLONG kDoorMoveMs = 900;
+static constexpr double kDoorRescanRadius = 3.0;
+// Powered redstone within this distance of a door opens it (Unreal units: 3.5
+// blocks, on purpose not only right next to it: the two worlds don't line up exactly).
+static constexpr double kRedstoneReach = 245.0;
+// Winged characters: how far out and how high a phantom circles, how fast
+// it goes round (radians per second), flies and dives (units per second),
+// and how long it waits between dives.
+static constexpr double kWingRadius = 350.0;
+static constexpr double kWingHeight = 420.0;
+static constexpr double kWingTurn = 0.9;
+static constexpr double kWingSpeed = 650.0;
+static constexpr double kWingDiveSpeed = 1100.0;
+static constexpr ULONGLONG kWingDiveEveryMs = 8000;
+static constexpr ULONGLONG kWingDiveMs = 2500;
+// Wings Minecraft hasn't confirmed for this long are gone (it repeats every 2 s).
+static constexpr ULONGLONG kWingTimeoutMs = 6000;
+// How hard a slime block throws a character up (units per second).
+static constexpr float kSlimeLaunch = 950.0f;
+// The middle button let go within this long is a click (pick), not a hold (carry).
+static constexpr ULONGLONG kPickClickMs = 250;
+// A shield stops characters this close in front of it (2 blocks), at most this often.
+static constexpr double kShieldReach = 140.0;
+static constexpr ULONGLONG kShieldBashMs = 600;
+// UE's MOVE_None: a character in a bucket doesn't move.
+static constexpr std::uint8_t kMoveNone = 0;
+// A lead Minecraft hasn't mentioned for this long is gone.
+static constexpr ULONGLONG kLeadTimeoutMs = 1000;
+// A lead is this long (Unreal units: 6 blocks, where Minecraft starts pulling).
+static constexpr double kLeadLength = 420.0;
+// A captive Minecraft hasn't mentioned for this long is free again.
+static constexpr ULONGLONG kCaptiveTimeoutMs = 600;
+// How high above Freddy's feet the rider is if it couldn't be measured.
+static constexpr double kDefaultSeat = 105.0;
+// Creative grab: held at least this far from the camera, and how hard a
+// loose object is pulled to that spot (per second, as a fraction of the gap).
+static constexpr double kGrabMinDistance = 120.0;
+static constexpr double kGrabPull = 12.0;
+// With the button held, one more hit this often.
+static constexpr ULONGLONG kHoldSwingMs = 250;
 static constexpr ULONGLONG kBreakPauseMs = 3000;
 // How long a bot that can't be launched keeps sliding.
 static constexpr ULONGLONG kShoveMs = 300;
@@ -196,6 +253,142 @@ public:
     // Minecraft's player is in creative mode (as of the last state read).
     bool creative_mode = false;
     bool holds_sword = false;
+    bool holds_flip_tag = false;
+    // Gamerule skycraft:allow_opening_doors is off.
+    bool doors_locked = false;
+    // The broken-object paper in Minecraft's main hand (0: none).
+    std::uint32_t held_token = 0;
+
+    // Broken objects and how to make them again. The first time a paper is
+    // used the original comes back; after that (creative keeps the paper)
+    // each use makes a copy of its class, with the same mesh.
+    struct Token
+    {
+        std::uint32_t id = 0;
+        RC::Unreal::FWeakObjectPtr object;
+        bool taken_away = true;
+        // A character in a bucket, not a broken object.
+        bool character = false;
+        RC::Unreal::FWeakObjectPtr object_class;
+        RC::Unreal::FWeakObjectPtr mesh;
+    };
+
+    std::vector<Token> tokens;
+    std::uint32_t next_token = 1;
+
+    // Characters on a lead, and ones stuck in a Minecraft boat or minecart.
+    bool holds_lead = false;
+    // The middle button: when it went down, to tell a click from a hold.
+    bool grab_was_down = false;
+    ULONGLONG grab_down_tick = 0;
+
+    // Minecraft's shield is up; whether that switched the game's jumpscares
+    // off (so they go back on), and when it last knocked someone back.
+    bool shield_up = false;
+    bool shield_took_scare = false;
+    ULONGLONG shield_bash_tick = 0;
+
+    // Minecraft's spyglass is at the eye.
+    bool spyglass_up = false;
+
+    // A water bucket in Minecraft's hand scoops up a character.
+    bool holds_bucket = false;
+
+    // Characters a dispenser gave an elytra: they fly. Freddy keeps the
+    // player company like an allay; the others circle and dive like phantoms.
+    struct Winged
+    {
+        RC::Unreal::FWeakObjectPtr object;
+        ULONGLONG seen = 0;
+        double angle = 0.0;
+        bool diving = false;
+        ULONGLONG next_dive = 0;
+        ULONGLONG dive_until = 0;
+    };
+
+    std::vector<Winged> winged;
+    ULONGLONG wings_tick = 0;
+
+    // What the game's subtitle widgets showed last, to tell a new line.
+    struct Spoken
+    {
+        RC::Unreal::FWeakObjectPtr widget;
+        std::vector<std::wstring> lines;
+        // The widget's text block: which text it had, and its lines.
+        const void* rich_data = nullptr;
+        std::vector<std::wstring> rich_lines;
+        float time = 0.0f;
+    };
+
+    std::vector<Spoken> spoken;
+    ULONGLONG subtitles_tick = 0;
+    std::uint16_t chat_line = 0;
+
+    // A character on Minecraft's lead: where the other end is (the player's
+    // hand or a knot on a fence), and when Minecraft last said so.
+    struct Lead
+    {
+        RC::Unreal::FWeakObjectPtr object;
+        double post[3]{};
+        ULONGLONG seen = 0;
+    };
+
+    std::vector<Lead> leashed;
+
+    struct Captive
+    {
+        RC::Unreal::FWeakObjectPtr object;
+        ULONGLONG seen = 0;
+    };
+
+    std::vector<Captive> captives;
+
+    // Freddy as a mule: who he is, whether the player sits on him, and how
+    // high above his feet Minecraft has the rider.
+    RC::Unreal::FWeakObjectPtr freddy;
+    bool riding_freddy = false;
+    double seat_height = 0.0;
+
+    // What the middle button holds (creative), and how far in front of the camera.
+    RC::Unreal::FWeakObjectPtr grabbed_pawn;
+    RC::Unreal::FWeakObjectPtr grabbed_part;
+    double grab_distance = 0.0;
+    bool grab_tried = false;
+    // The game's doors near the player (see update_doors).
+    struct Door
+    {
+        RC::Unreal::FWeakObjectPtr object;
+        bool seen = false;
+        bool open = false;
+        bool powered = false;
+    };
+
+    struct DoorRescan
+    {
+        double x, y, z;
+        ULONGLONG when;
+    };
+
+    std::vector<Door> doors;
+    std::vector<DoorRescan> door_rescans;
+    ULONGLONG doors_checked = 0;
+    ULONGLONG doors_listed = 0;
+    // Redstone sources that are on, as Minecraft blocks.
+    std::vector<std::array<int, 3>> redstone;
+    // Blueprint classes of the characters met so far (see remember_characters).
+    std::set<std::wstring> known_characters;
+    bool characters_loaded = false;
+    // Characters that are upside down: where their mesh belongs, and where it is held now.
+    struct Flipped
+    {
+        RC::Unreal::FWeakObjectPtr object;
+        float home[3]{};
+        float lifted = 0.0f;
+    };
+
+    std::vector<Flipped> flipped;
+    RC::Unreal::Hook::GlobalCallbackId post_tick_callback = RC::Unreal::Hook::ERROR_ID;
+    ULONGLONG swing_repeat_tick = 0;
     // The bot that is sliding away from a hit.
     RC::Unreal::FWeakObjectPtr shoved;
     double shove_direction[2]{};
@@ -225,6 +418,19 @@ public:
     bool minecraft_mode = false;
     bool minecraft_launch_started = false;
     bool f6_was_down = false;
+    bool f6_waiting = false;
+    // The game shows its mouse pointer: one of its own screens is up.
+    bool game_screen_open = false;
+    // The game is letting the player walk (see where it is set).
+    bool game_playable = false;
+    ULONGLONG playable_since = 0;
+    // Minecraft mode went off because Gregory went into a hiding spot.
+    bool back_after_hiding = false;
+    // The seat Minecraft gives Steve in a hiding spot: when it was asked
+    // for, whether he has sat on it, and whether he already asked to leave.
+    ULONGLONG hide_seat_tick = 0;
+    bool hide_seated = false;
+    bool hide_leaving = false;
     HANDLE minecraft_job = nullptr;
     std::uint32_t teleport_seq = 1;
     std::uint64_t last_mc_frame = 0;
@@ -460,6 +666,11 @@ public:
             RC::Unreal::Hook::UnregisterCallback(tick_callback);
         }
 
+        if (post_tick_callback != RC::Unreal::Hook::ERROR_ID)
+        {
+            RC::Unreal::Hook::UnregisterCallback(post_tick_callback);
+        }
+
         input::uninstall();
         overlay::uninstall();
 
@@ -636,6 +847,21 @@ public:
             );
         }
 
+        // After the game's own tick: for what the game would otherwise undo.
+        post_tick_callback = RC::Unreal::Hook::RegisterEngineTickPostCallback(
+            [this](auto&, RC::Unreal::UEngine*, float, bool)
+            {
+                try
+                {
+                    hold_flipped();
+                }
+                catch (...)
+                {
+                }
+            },
+            { false, true, STR("SecurityBreachMinecraftPassthrough"), STR("AfterGameTick") }
+        );
+
         overlay::install(g_link);
     }
 
@@ -755,10 +981,6 @@ public:
         // Minecraft only opens its world once it sees this, and drops the
         // link when it stops. Keep it going while there is no Gregory yet.
         g_link.heartbeat();
-        if (!minecraft_mode)
-        {
-            g_link.discard_unused_rings();
-        }
 
         skycraft::proto::McState mc_state{};
         const bool have_mc_state = g_link.read_mc_state(mc_state);
@@ -767,21 +989,41 @@ public:
         const bool f6_down =
             (::GetAsyncKeyState(VK_F6) & 0x8000) != 0;
 
-        if (f6_down && !f6_was_down)
-        {
-            const bool minecraft_ready =
-                have_mc_state &&
-                (mc_state.flags & skycraft::proto::kMcInWorld) != 0;
+        // Minecraft has to be in its world, and the game has to be playing:
+        // on a loading screen or in a cutscene Gregory isn't the player's yet,
+        // and taking him over there ended the game once.
+        const bool minecraft_ready =
+            have_mc_state &&
+            (mc_state.flags & skycraft::proto::kMcInWorld) != 0 &&
+            game_playable;
 
+        // F6 pressed while Minecraft was still starting: it counts once
+        // Minecraft is in its world (F6 again cancels).
+        const bool waiting_f6_now_ready = f6_waiting && minecraft_ready && !minecraft_mode;
+
+        if ((f6_down && !f6_was_down) || waiting_f6_now_ready)
+        {
             if (!minecraft_mode && !minecraft_ready)
             {
+                f6_waiting = !f6_waiting;
+
                 // Minecraft takes a while to start and open its world.
                 RC::Output::send<RC::LogLevel::Default>(
-                    STR("SBMP Minecraft is not in its world yet, F6 ignored\n")
+                    f6_waiting
+                        ? STR("SBMP Minecraft or the game isn't ready yet, Minecraft mode starts when both are\n")
+                        : STR("SBMP Minecraft mode will not start after all\n")
                 );
             }
             else
             {
+                f6_waiting = false;
+
+                if (back_after_hiding)
+                {
+                    back_after_hiding = false;
+                    g_link.push_input(skycraft::proto::kInHide, 0);
+                }
+
                 minecraft_mode = !minecraft_mode;
 
                 RC::Output::send<RC::LogLevel::Default>(
@@ -852,9 +1094,12 @@ public:
 
             auto& shown = overlay::state();
 
-            shown.show.store(minecraft_mode && in_world && !game_paused, std::memory_order_relaxed);
+            // Hiding is the game's doing, but the player is still Steve.
+            const bool as_steve = minecraft_mode || back_after_hiding;
+
+            shown.show.store(as_steve && in_world && !game_paused, std::memory_order_relaxed);
             shown.crosshair.store(
-                minecraft_mode && in_world && !screen_open && mc_state.cameraMode == 0,
+                as_steve && in_world && !screen_open && mc_state.cameraMode == 0,
                 std::memory_order_relaxed
             );
             shown.gui_scale.store(static_cast<int>(mc_state.guiScale), std::memory_order_relaxed);
@@ -874,6 +1119,53 @@ public:
         // Minecraft would eat its clicks. Hand everything back while paused.
         game_paused = is_game_paused(controller);
 
+        // One of the game's own screens (the upgrade terminal, a mission
+        // screen): it shows its mouse pointer for those. Same as a pause:
+        // nothing of Minecraft's is drawn and the mouse and keys are the game's.
+        // bShowMouseCursor is the first bit of its group of flags.
+        if (auto* pointer = controller->GetValuePtrByPropertyNameInChain<std::uint8_t>(STR("bShowMouseCursor")))
+        {
+            const bool game_screen = (*pointer & 1) != 0;
+
+            if (game_screen != game_screen_open)
+            {
+                game_screen_open = game_screen;
+
+                RC::Output::send<RC::LogLevel::Default>(
+                    STR("SBMP the game's own screen: {}\n"),
+                    game_screen ? STR("open, Minecraft steps aside") : STR("closed")
+                );
+            }
+
+            game_paused = game_paused || game_screen;
+        }
+
+        // While the game itself ignores the player's walking (loading screen,
+        // cutscene) it isn't playable. Only asked while Minecraft mode is
+        // off: with it on, that ignore is our own.
+        if (!minecraft_mode)
+        {
+            bool ignored = false;
+
+            call_getter(controller, STR("IsMoveInputIgnored"), ignored);
+
+            // A second of being playable, so a save that has just loaded has settled.
+            if (ignored || game_paused)
+            {
+                playable_since = 0;
+                game_playable = false;
+            }
+            else
+            {
+                if (playable_since == 0)
+                {
+                    playable_since = now;
+                }
+
+                game_playable = now - playable_since > 1000;
+            }
+        }
+
         if (game_paused)
         {
             overlay::state().show.store(false, std::memory_order_relaxed);
@@ -882,7 +1174,7 @@ public:
         input::update(
             g_link,
             overlay::state().window.load(std::memory_order_relaxed),
-            minecraft_mode && !game_paused,
+            (minecraft_mode || back_after_hiding) && !game_paused,
             have_mc_state && (mc_state.flags & skycraft::proto::kMcScreenOpen) != 0,
             overlay::state().viewport_w.load(std::memory_order_relaxed),
             overlay::state().viewport_h.load(std::memory_order_relaxed)
@@ -920,6 +1212,34 @@ public:
             if (auto* pawn = controller->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("Pawn")))
             {
                 first_person_character = *pawn;
+            }
+        }
+
+        // Seen 13 Oct: with Gregory walking behind the sick Freddy, the above
+        // gave FreddyGuideSick_C, and the mod moved Freddy while Gregory stood
+        // still. If that isn't a Gregory but the camera looks from one, the
+        // camera is right.
+        const auto is_gregory = [](RC::Unreal::UObject* who)
+        {
+            return who != nullptr && lower(who->GetClassPrivate()->GetName()).rfind(L"gregory", 0) == 0;
+        };
+
+        if (!is_gregory(first_person_character))
+        {
+            RC::Unreal::UObject* viewed = nullptr;
+
+            if (call_getter(controller, STR("GetViewTarget"), viewed) && is_gregory(viewed))
+            {
+                if (viewed != last_character)
+                {
+                    RC::Output::send<RC::LogLevel::Default>(
+                        STR("SBMP the controller points at {}, but the camera looks from {}: that one is the player\n"),
+                        first_person_character != nullptr ? first_person_character->GetFullName() : STR("nothing"),
+                        viewed->GetFullName()
+                    );
+                }
+
+                first_person_character = viewed;
             }
         }
 
@@ -996,6 +1316,89 @@ public:
             if (minecraft_mode)
             {
                 request_sync(STR("Gregory is back"));
+            }
+        }
+
+        // A hiding spot (locker, under a table): the game moves Gregory in and
+        // out of it and he leaves with its own key, so while he hides it is
+        // plain Security Breach. Minecraft mode comes back when he is out.
+        {
+            auto* in_hiding = first_person_character->GetValuePtrByPropertyNameInChain<bool>(STR("IsHiding"));
+            auto* moving = first_person_character->GetValuePtrByPropertyNameInChain<bool>(STR("Hide/UnhideTransitionActive"));
+            const bool hiding = (in_hiding != nullptr && *in_hiding) || (moving != nullptr && *moving);
+
+            if (hiding && minecraft_mode)
+            {
+                minecraft_mode = false;
+                back_after_hiding = true;
+                hide_seat_tick = 0;
+                hide_seated = false;
+                hide_leaving = false;
+
+                RC::Output::send<RC::LogLevel::Default>(
+                    STR("SBMP hiding: the game has Gregory until he comes out\n")
+                );
+            }
+            else if (!hiding && back_after_hiding)
+            {
+                back_after_hiding = false;
+                minecraft_mode = true;
+                watch_tick = now;
+                g_link.push_input(skycraft::proto::kInHide, 0);
+                request_sync(STR("out of the hiding spot"));
+            }
+            else if (back_after_hiding && in_hiding != nullptr && *in_hiding && (moving == nullptr || !*moving))
+            {
+                // Inside. To Steve a hiding spot is a seat: Minecraft sits him
+                // on one nobody sees, and getting off it (Shift) is coming out.
+                const bool seated = have_mc_state && (mc_state.flags & skycraft::proto::kMcHiding) != 0;
+
+                if (hide_seat_tick == 0)
+                {
+                    const auto spot = reinterpret_cast<RC::Unreal::AActor*>(first_person_character)->K2_GetActorLocation();
+                    const double feet = spot.Z() - capsule_half_height(first_person_character);
+
+                    hide_seat_tick = now;
+
+                    g_link.push_input(
+                        skycraft::proto::kInHide,
+                        1,
+                        static_cast<std::int32_t>(sb_to_mc_x(spot.X()) * 100.0),
+                        static_cast<std::int32_t>(sb_to_mc_y(feet) * 100.0),
+                        static_cast<std::int32_t>(sb_to_mc_z(spot.Y()) * 100.0)
+                    );
+                }
+
+                if (seated && !hide_seated)
+                {
+                    hide_seated = true;
+
+                    RC::Output::send<RC::LogLevel::Default>(
+                        STR("SBMP hiding: Steve sits in the hiding spot, Shift gets him out\n")
+                    );
+                }
+
+                // Off the seat, or the seat never came (then Shift itself counts).
+                const bool got_off = hide_seated && !seated;
+                const bool no_seat = !hide_seated && now - hide_seat_tick > 1500 && (::GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+
+                if (!hide_leaving && (got_off || no_seat))
+                {
+                    hide_leaving = true;
+
+                    auto* leave = first_person_character->GetFunctionByNameInChain(STR("LeaveHidingSpace"));
+
+                    RC::Output::send<RC::LogLevel::Default>(
+                        STR("SBMP hiding: Steve {}, leaving the hiding spot: {}\n"),
+                        got_off ? STR("got off the seat") : STR("pressed Shift without a seat"),
+                        leave != nullptr ? STR("asked the game") : STR("the game has no LeaveHidingSpace")
+                    );
+
+                    if (leave != nullptr)
+                    {
+                        first_person_character->ProcessEvent(leave, nullptr);
+                    }
+                }
             }
         }
 
@@ -1076,14 +1479,58 @@ public:
             set_crouch(first_person_character, false);
         }
 
+        // Read even when Minecraft mode is off: what is switched on in
+        // Minecraft has to stay known.
+        handle_events();
+
         creative_mode = (mc_state.flags & skycraft::proto::kMcCreative) != 0;
         holds_sword = (mc_state.flags & skycraft::proto::kMcHoldsSword) != 0;
+        holds_flip_tag = (mc_state.flags & skycraft::proto::kMcHoldsFlipTag) != 0;
+        doors_locked = (mc_state.flags & skycraft::proto::kMcDoorsLocked) != 0;
+        holds_lead = (mc_state.flags & skycraft::proto::kMcHoldsLead) != 0;
+        holds_bucket = (mc_state.flags & skycraft::proto::kMcHoldsBucket) != 0;
+        held_token = mc_state.heldToken;
+
+        if (back_after_hiding)
+        {
+            // In a hiding spot nothing of the game's is in reach: clicks are Minecraft's.
+            if (input::take_use_click())
+            {
+                input::forward_use_click();
+            }
+
+            input::take_attack_click();
+        }
 
         if (minecraft_mode)
         {
             handle_clicks(controller, first_person_character);
             actors::update(g_link, first_person_character);
-            handle_events();
+            remember_characters();
+            update_doors(first_person_character);
+            update_grab(first_person_character);
+            update_ride(mc_state, control_rotation->Yaw);
+            update_leads(first_person_character);
+            release_captives();
+            update_wings(first_person_character);
+            update_spyglass(controller, (mc_state.flags & skycraft::proto::kMcScoping) != 0);
+            update_shield(first_person_character, (mc_state.flags & skycraft::proto::kMcBlocking) != 0);
+            update_subtitles();
+
+            // Fire, lava and magma: a character that stands in it jumps out
+            // of it, stunned. Lava throws harder.
+            actors::take_burning(
+                [](RC::Unreal::UObject* burnt, int hazard, void* context)
+                {
+                    static_cast<SecurityBreachMinecraftPassthrough*>(context)->hit_character(
+                        burnt,
+                        0.0,
+                        0.0,
+                        hazard == skycraft::proto::kHazardLava ? 2.0 : 1.0
+                    );
+                },
+                this
+            );
         }
         else
         {
@@ -1114,6 +1561,13 @@ public:
                 }
 
                 hidden_character = wanted;
+                hide_extras(first_person_character, wanted != nullptr);
+            }
+            else if (wanted != nullptr && log_now)
+            {
+                // The game shows these again on its own (seen 13 Oct: Gregory's
+                // watch arm floating next to Steve), so once a second.
+                hide_extras(wanted, true);
             }
         }
 
@@ -1196,6 +1650,16 @@ public:
 
         if (std::sqrt(gap * gap + gap_z * gap_z) > kMaxStep)
         {
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP drift: Minecraft at ({}, {}, {}), Gregory at ({}, {}, {})\n"),
+                sb_x,
+                sb_y,
+                sb_z,
+                location.X(),
+                location.Y(),
+                location.Z()
+            );
+
             request_sync(STR("positions drifted apart"));
             return;
         }
@@ -1203,7 +1667,10 @@ public:
         // Minecraft only knows the geometry that has been scanned. Where it
         // doesn't, its player falls through the floor.
         const bool supported =
-            (mc_state.flags & (skycraft::proto::kMcOnGround | skycraft::proto::kMcFlying | skycraft::proto::kMcSwimming)) != 0;
+            (mc_state.flags & (
+                skycraft::proto::kMcOnGround | skycraft::proto::kMcFlying | skycraft::proto::kMcSwimming |
+                skycraft::proto::kMcRidingHost  // in the saddle: it is the mule that stands on the ground
+            )) != 0;
 
         if (supported)
         {
@@ -1250,8 +1717,18 @@ public:
     {
         const bool attack = input::take_attack_click();
         const bool use = input::take_use_click();
+        const ULONGLONG click_tick = ::GetTickCount64();
 
-        if (!attack && !use)
+        // Holding the button keeps hacking at whatever can be broken, like
+        // mining a block. It doesn't keep hitting characters.
+        const bool repeat = !attack && input::attack_held() && click_tick - swing_repeat_tick > kHoldSwingMs;
+
+        if (attack || repeat)
+        {
+            swing_repeat_tick = click_tick;
+        }
+
+        if (!attack && !use && !repeat)
         {
             return;
         }
@@ -1270,7 +1747,7 @@ public:
             }
         };
 
-        if (attack)
+        if (attack || repeat)
         {
             double to[3]{};
 
@@ -1279,10 +1756,29 @@ public:
             RC::Unreal::UObject* part = nullptr;
             auto* target = collision::trace(character, view.position, to, kAttackThickness, &part);
 
-            if (target != nullptr && target->GetFunctionByNameInChain(STR("GetController")) != nullptr)
+            // Never the player's own body (seen 13 Oct: Steve hit Gregory forward).
+            if (target != nullptr && (target == character || lower(target->GetClassPrivate()->GetName()).rfind(L"gregory", 0) == 0))
+            {
+                target = nullptr;
+                part = nullptr;
+            }
+
+            if (repeat && (target == nullptr || break_hits(target, part) == 0))
+            {
+                // Nothing to keep hacking at.
+            }
+            else if (target != nullptr && target->GetFunctionByNameInChain(STR("GetController")) != nullptr)
             {
                 swing_target = target;
                 swing_tick = ::GetTickCount64();
+                hit_character(target, view.forward[0], view.forward[1], 1.0);
+            }
+            else if (!repeat && target != nullptr && break_hits(target, part) == 0 &&
+                     target->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("SkeletalMeshComponent")) != nullptr)
+            {
+                // A figure that only stands there (the staff bots behind a
+                // counter are SkeletalMeshActors, not characters): it has no
+                // movement of its own, so it is slid away like the wet floor bots.
                 hit_character(target, view.forward[0], view.forward[1], 1.0);
             }
             else if (target != nullptr && break_hits(target, part) > 0)
@@ -1311,6 +1807,11 @@ public:
                 breaking_tick = hit_tick;
                 ++breaking_hits;
 
+                if (repeat)
+                {
+                    g_link.push_input(skycraft::proto::kInSwing, 0);
+                }
+
                 if (creative_mode || breaking_hits >= needed)
                 {
                     RC::Output::send<RC::LogLevel::Default>(
@@ -1329,12 +1830,7 @@ public:
                         static_cast<std::int32_t>(sb_to_mc_z(spot.Y()) * 100.0)
                     );
 
-                    alignas(16) std::uint8_t no_params[16]{};
-
-                    if (auto* destroy = target->GetFunctionByNameInChain(STR("K2_DestroyActor")))
-                    {
-                        target->ProcessEvent(destroy, no_params);
-                    }
+                    take_away(target, spot.X(), spot.Y(), spot.Z());
 
                     breaking = RC::Unreal::FWeakObjectPtr{};
                 }
@@ -1369,6 +1865,134 @@ public:
         if (!use)
         {
             return;
+        }
+
+        // A water bucket: the character under the crosshair goes in it, like a fish.
+        if (holds_bucket)
+        {
+            double far_end[3]{};
+
+            reach(kUseReach, far_end);
+
+            auto* who = collision::trace(character, view.position, far_end, kAttackThickness);
+
+            if (who != nullptr && who->GetFunctionByNameInChain(STR("GetController")) != nullptr)
+            {
+                const auto at = reinterpret_cast<RC::Unreal::AActor*>(who)->K2_GetActorLocation();
+
+                RC::Output::send<RC::LogLevel::Default>(
+                    STR("SBMP bucket: scooped up {}\n"),
+                    who->GetFullName()
+                );
+
+                take_away(who, at.X(), at.Y(), at.Z(), true);
+
+                g_link.push_input(skycraft::proto::kInSwing, 0);
+                input::consume_use_click();
+                return;
+            }
+        }
+
+        // A lead is Minecraft's own (it draws it and ties it to fences): the
+        // mod only says which character it goes on. One that is on a lead
+        // comes off it with any click, like an animal.
+        if (holds_lead || !leashed.empty())
+        {
+            double far_end[3]{};
+
+            reach(kUseReach, far_end);
+
+            auto* who = collision::trace(character, view.position, far_end, kAttackThickness);
+
+            if (who != nullptr && who->GetFunctionByNameInChain(STR("GetController")) != nullptr)
+            {
+                const bool on_lead = std::any_of(leashed.begin(), leashed.end(), [who](const Lead& l) { return l.object.Get() == who; });
+                const std::uint32_t id = actors::id_of(who);
+
+                if (id != 0 && (on_lead || holds_lead))
+                {
+                    g_link.push_input(skycraft::proto::kInLeash, on_lead ? 0 : 1, static_cast<std::int32_t>(id));
+
+                    RC::Output::send<RC::LogLevel::Default>(
+                        STR("SBMP lead: asked Minecraft to take {} {} the lead\n"),
+                        who->GetFullName(),
+                        on_lead ? STR("off") : STR("on")
+                    );
+
+                    g_link.push_input(skycraft::proto::kInSwing, 0);
+                    input::consume_use_click();
+                    return;
+                }
+            }
+        }
+
+        // Freddy is a mule: using him is getting on. (While riding, Minecraft's
+        // inventory key opens his saddle and chest.)
+        if (!riding_freddy)
+        {
+            double far_end[3]{};
+
+            reach(kUseReach, far_end);
+
+            auto* who = collision::trace(character, view.position, far_end, kAttackThickness);
+
+            if (who != nullptr && who->GetFunctionByNameInChain(STR("GetController")) != nullptr && is_freddy(who))
+            {
+                const auto at = reinterpret_cast<RC::Unreal::AActor*>(who)->K2_GetActorLocation();
+                const double feet = at.Z() - capsule_half_height(who);
+
+                freddy = who;
+
+                g_link.push_input(
+                    skycraft::proto::kInMountFreddy,
+                    0,
+                    static_cast<std::int32_t>(sb_to_mc_x(at.X()) * 100.0),
+                    static_cast<std::int32_t>(sb_to_mc_y(feet) * 100.0),
+                    static_cast<std::int32_t>(sb_to_mc_z(at.Y()) * 100.0)
+                );
+                g_link.push_input(skycraft::proto::kInSwing, 0);
+                input::consume_use_click();
+
+                RC::Output::send<RC::LogLevel::Default>(
+                    STR("SBMP ride: getting on {}\n"),
+                    who->GetFullName()
+                );
+
+                return;
+            }
+        }
+
+        // The paper of a broken object: it goes back where the player points.
+        if (held_token != 0 && put_back(held_token, character))
+        {
+            input::consume_use_click();
+            return;
+        }
+
+        // A bucket with a character in it never reaches Minecraft: there it
+        // is a water bucket, and emptying it would lose the character.
+        if (held_token != 0 && std::any_of(tokens.begin(), tokens.end(), [this](const Token& t) { return t.id == held_token && t.character; }))
+        {
+            input::consume_use_click();
+            return;
+        }
+
+        // A name tag called Dinnerbone or Grumm on a character: upside down,
+        // as with Minecraft's mobs. Again puts it back.
+        if (holds_flip_tag)
+        {
+            double far_end[3]{};
+
+            reach(kUseReach, far_end);
+
+            auto* who = collision::trace(character, view.position, far_end, kAttackThickness);
+
+            if (who != nullptr && who->GetFunctionByNameInChain(STR("GetController")) != nullptr && flip_character(who))
+            {
+                g_link.push_input(skycraft::proto::kInSwing, 0);
+                input::consume_use_click();
+                return;
+            }
         }
 
         // A Minecraft block under the crosshair: the click places or uses that.
@@ -1417,34 +2041,14 @@ public:
     // else the game lets the player use is used the game's way.
     auto use_object(RC::Unreal::UObject* target, RC::Unreal::UObject* character, RC::Unreal::UObject* controller) -> bool
     {
-        auto* open = target->GetFunctionByNameInChain(STR("ForceDoorOpen"));
-        auto* close = target->GetFunctionByNameInChain(STR("ForceDoorClose"));
-
-        if (open != nullptr && close != nullptr)
+        // Gamerule skycraft:allow_opening_doors off: doors are the game's
+        // business (its own interaction below still works, with its locks).
+        if (!doors_locked && target->GetFunctionByNameInChain(STR("ForceDoorOpen")) != nullptr)
         {
-            // The game's doors are automatic: they open for whoever may pass
-            // and shut again right away for whoever may not. Take the lock
-            // off and switch the automatic part off for the player, so the
-            // door stays the way Steve left it.
-            if (auto* door = target->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("Door")); door != nullptr && *door != nullptr)
-            {
-                call_with(*door, STR("SetLockedForPlayer"), false);
-                call_with(*door, STR("SetSecurityLevel"), std::int32_t{ 0 });
-                call_with(*door, STR("SetAutomaticDoorEnableForPlayer"), false);
-            }
-
-            // No key or pass needed any more (an empty name), and nothing
-            // invisible left standing in the doorway.
-            call_with(target, STR("SetDoorRequiredItem"), std::uint64_t{ 0 });
-            call_with(target, STR("ClearPlayerBlocker"), std::uint64_t{ 0 });
-
             bool is_open = false;
 
             call_getter(target, STR("IsDoorOpen"), is_open);
-
-            alignas(16) std::uint8_t no_params[16]{};
-
-            target->ProcessEvent(is_open ? close : open, no_params);
+            set_door(target, !is_open);
             g_link.push_input(skycraft::proto::kInSwing, 0);
 
             RC::Output::send<RC::LogLevel::Default>(
@@ -1573,7 +2177,7 @@ public:
 
             const auto name = lower(pawn->GetClassPrivate()->GetName());
 
-            if (name.find(wanted) != std::wstring::npos && (existing == nullptr || name.size() < existing_length))
+            if (name.find(wanted) != std::wstring::npos && name.find(L"enterexit") == std::wstring::npos && (existing == nullptr || name.size() < existing_length))
             {
                 existing = pawn;
                 existing_length = name.size();
@@ -1602,12 +2206,16 @@ public:
             return;
         }
 
-        // A new one needs the character's class. Take it from one that exists,
-        // else look for a loaded blueprint class by name.
+        // A new one needs the character's class: from one that walks around,
+        // else a class the game has loaded, else one remembered from an
+        // earlier meeting, which is then loaded from the game's files.
         RC::Unreal::UObject* character_class = existing != nullptr ? existing->GetClassPrivate() : nullptr;
 
         if (character_class == nullptr)
         {
+            static auto* pawn_class = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UClass*>(
+                nullptr, nullptr, STR("/Script/Engine.Pawn"));
+
             std::vector<RC::Unreal::UObject*> classes;
 
             RC::Unreal::UObjectGlobals::FindAllOf(STR("BlueprintGeneratedClass"), classes);
@@ -1616,18 +2224,19 @@ public:
 
             for (auto* candidate : classes)
             {
-                if (candidate == nullptr)
+                if (candidate == nullptr || pawn_class == nullptr)
                 {
                     continue;
                 }
 
                 const auto name = lower(candidate->GetName());
 
-                // Characters only: their class has the pawn's functions.
                 if (
                     name.find(wanted) != std::wstring::npos &&
+                    // FreddyEnterExitPawn is a helper of the game, not a Freddy.
+                    name.find(L"enterexit") == std::wstring::npos &&
                     (character_class == nullptr || name.size() < best) &&
-                    static_cast<RC::Unreal::UClass*>(candidate)->GetFunctionByNameInChain(STR("LaunchCharacter")) != nullptr
+                    static_cast<RC::Unreal::UClass*>(candidate)->IsChildOf(pawn_class)
                 )
                 {
                     character_class = candidate;
@@ -1638,8 +2247,36 @@ public:
 
         if (character_class == nullptr)
         {
+            std::wstring path;
+
+            for (const auto& known : known_characters)
+            {
+                // The name after the last slash: "Roxy.Roxy_C".
+                const auto slash = known.find_last_of(L'/');
+                const auto name = lower(slash == std::wstring::npos ? known : known.substr(slash + 1));
+
+                if (name.find(wanted) != std::wstring::npos && name.find(L"enterexit") == std::wstring::npos && (path.empty() || known.size() < path.size()))
+                {
+                    path = known;
+                }
+            }
+
+            if (!path.empty())
+            {
+                character_class = load_class(player, path);
+
+                RC::Output::send<RC::LogLevel::Default>(
+                    STR("SBMP command: loading {} from the game's files: {}\n"),
+                    path,
+                    character_class != nullptr ? STR("done") : STR("failed")
+                );
+            }
+        }
+
+        if (character_class == nullptr)
+        {
             RC::Output::send<RC::LogLevel::Default>(
-                STR("SBMP command: the game has no character class loaded for '{}'\n"),
+                STR("SBMP command: no character class for '{}' is loaded, and none was met before to load\n"),
                 wanted
             );
 
@@ -1653,6 +2290,125 @@ public:
             character_class->GetFullName(),
             spawned != nullptr ? STR("done") : STR("the game refused")
         );
+    }
+
+    // Loads a blueprint class by its asset path (UKismetSystemLibrary::LoadClassAsset_Blocking).
+    static auto load_class(RC::Unreal::UObject* world_context, const std::wstring& path) -> RC::Unreal::UObject*
+    {
+        static auto* library = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UObject*>(
+            nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+        static auto* function = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UFunction*>(
+            nullptr, nullptr, STR("/Script/Engine.KismetSystemLibrary:LoadClassAsset_Blocking"));
+
+        if (library == nullptr || function == nullptr)
+        {
+            return nullptr;
+        }
+
+        auto* asset = function->FindProperty(RC::Unreal::FName(STR("AssetClass"), RC::Unreal::FNAME_Find));
+        auto* result = function->GetReturnProperty();
+
+        if (asset == nullptr || result == nullptr)
+        {
+            return nullptr;
+        }
+
+        // A soft class pointer: a weak pointer (unset), a tag, then the path
+        // as a name plus an empty sub-path string.
+        struct
+        {
+            std::int32_t object_index{ -1 };
+            std::int32_t serial_number{ 0 };
+            std::int32_t tag{ 0 };
+            std::int32_t padding{ 0 };
+            RC::Unreal::FName asset_path;
+            void* sub_path_data{ nullptr };
+            std::int32_t sub_path_num{ 0 };
+            std::int32_t sub_path_max{ 0 };
+        } soft;
+
+        soft.asset_path = RC::Unreal::FName(path.c_str(), RC::Unreal::FNAME_Add);
+
+        std::vector<std::uint8_t> params(function->GetParmsSize() + 16, 0);
+
+        std::memcpy(params.data() + asset->GetOffset_Internal(), static_cast<void*>(&soft), sizeof(soft));
+
+        library->ProcessEvent(function, params.data());
+
+        RC::Unreal::UObject* loaded = nullptr;
+
+        std::memcpy(&loaded, params.data() + result->GetOffset_Internal(), sizeof(loaded));
+
+        return loaded;
+    }
+
+    // Where the remembered character classes are kept: next to the mod's dll folder.
+    static auto characters_file() -> std::wstring
+    {
+        HMODULE module = nullptr;
+
+        ::GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&characters_file),
+            &module
+        );
+
+        wchar_t path[MAX_PATH * 2]{};
+
+        ::GetModuleFileNameW(module, path, static_cast<DWORD>(std::size(path)));
+
+        std::wstring folder = path;
+
+        // ...<mod>/dlls/main.dll -> ...<mod>/characters.txt
+        for (int i = 0; i < 2; ++i)
+        {
+            const auto slash = folder.find_last_of(L"\\/");
+
+            if (slash != std::wstring::npos)
+            {
+                folder.resize(slash);
+            }
+        }
+
+        return folder + L"\\characters.txt";
+    }
+
+    // Keeps the list of character classes across sessions, so one met
+    // yesterday can be summoned today.
+    auto remember_characters() -> void
+    {
+        if (!characters_loaded)
+        {
+            characters_loaded = true;
+
+            std::wifstream in(characters_file());
+            std::wstring line;
+
+            while (std::getline(in, line))
+            {
+                if (line.rfind(L"/Game/", 0) == 0)
+                {
+                    known_characters.insert(line);
+                }
+            }
+        }
+
+        const auto before = known_characters.size();
+
+        for (const auto& path : actors::known_classes())
+        {
+            known_characters.insert(path);
+        }
+
+        if (known_characters.size() != before)
+        {
+            std::wofstream out(characters_file(), std::ios::trunc);
+
+            for (const auto& path : known_characters)
+            {
+                out << path << L"\n";
+            }
+        }
     }
 
     // UGameplayStatics' two-step actor spawn, then a controller so its AI runs.
@@ -1741,6 +2497,178 @@ public:
         return actor;
     }
 
+    // Opens or closes one of the game's doors for good, lock or no lock.
+    static auto set_door(RC::Unreal::UObject* target, bool open) -> void
+    {
+        auto* force = target->GetFunctionByNameInChain(open ? STR("ForceDoorOpen") : STR("ForceDoorClose"));
+
+        if (force == nullptr)
+        {
+            return;
+        }
+
+        // The game's doors are automatic: they open for whoever may pass
+        // and shut again right away for whoever may not. Take the lock
+        // off and switch the automatic part off for the player, so the
+        // door stays the way Steve left it.
+        if (auto* door = target->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("Door")); door != nullptr && *door != nullptr)
+        {
+            call_with(*door, STR("SetLockedForPlayer"), false);
+            call_with(*door, STR("SetSecurityLevel"), std::int32_t{ 0 });
+            call_with(*door, STR("SetAutomaticDoorEnableForPlayer"), false);
+        }
+
+        // No key or pass needed any more (an empty name), and nothing
+        // invisible left standing in the doorway.
+        call_with(target, STR("SetDoorRequiredItem"), std::uint64_t{ 0 });
+        call_with(target, STR("ClearPlayerBlocker"), std::uint64_t{ 0 });
+
+        alignas(16) std::uint8_t no_params[16]{};
+
+        target->ProcessEvent(force, no_params);
+    }
+
+    // Keeps an eye on the game's doors near the player:
+    //  - one that opens or closes changes what Steve can walk through, so the
+    //    geometry around it is scanned again at once (and once more when the
+    //    door has finished moving);
+    //  - one with powered redstone within a few blocks opens, and closes
+    //    again when the power goes.
+    auto update_doors(RC::Unreal::UObject* player) -> void
+    {
+        const ULONGLONG now = ::GetTickCount64();
+
+        // Scans that were put off until a door stopped moving.
+        for (auto it = door_rescans.begin(); it != door_rescans.end();)
+        {
+            if (now >= it->when)
+            {
+                collision::invalidate(it->x, it->y, it->z, kDoorRescanRadius);
+                it = door_rescans.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+
+        if (now - doors_checked < kDoorCheckMs)
+        {
+            return;
+        }
+
+        doors_checked = now;
+
+        if (now - doors_listed > kDoorListMs)
+        {
+            doors_listed = now;
+
+            std::vector<RC::Unreal::UObject*> found;
+
+            RC::Unreal::UObjectGlobals::FindAllOf(STR("BP_DoorMaster_C"), found);
+
+            std::vector<Door> listed;
+
+            for (auto* object : found)
+            {
+                if (object == nullptr)
+                {
+                    continue;
+                }
+
+                Door door;
+
+                door.object = object;
+
+                // Keep what was known about it.
+                for (const auto& old : doors)
+                {
+                    if (old.object.Get() == object)
+                    {
+                        door = old;
+                        break;
+                    }
+                }
+
+                listed.push_back(door);
+            }
+
+            doors = std::move(listed);
+        }
+
+        const auto here = reinterpret_cast<RC::Unreal::AActor*>(player)->K2_GetActorLocation();
+
+        for (auto& door : doors)
+        {
+            auto* object = door.object.Get();
+
+            if (object == nullptr)
+            {
+                continue;
+            }
+
+            const auto at = reinterpret_cast<RC::Unreal::AActor*>(object)->K2_GetActorLocation();
+            const double dx = at.X() - here.X();
+            const double dy = at.Y() - here.Y();
+            const double dz = at.Z() - here.Z();
+
+            if (dx * dx + dy * dy + dz * dz > kDoorWatchRange * kDoorWatchRange)
+            {
+                continue;
+            }
+
+            // Redstone: any powered source within reach of the door.
+            bool powered = false;
+
+            for (const auto& source : redstone)
+            {
+                const double sx = mc_to_sb_x(source[0] + 0.5) - at.X();
+                const double sy = mc_to_sb_z(source[2] + 0.5) - at.Y();
+                const double sz = mc_to_sb_y(source[1] + 0.5) - at.Z();
+
+                if (sx * sx + sy * sy + sz * sz < kRedstoneReach * kRedstoneReach)
+                {
+                    powered = true;
+                    break;
+                }
+            }
+
+            if (powered != door.powered && !doors_locked)
+            {
+                door.powered = powered;
+                set_door(object, powered);
+
+                RC::Output::send<RC::LogLevel::Default>(
+                    STR("SBMP redstone: {} door {}\n"),
+                    powered ? STR("opened") : STR("closed"),
+                    object->GetFullName()
+                );
+            }
+
+            bool open = false;
+
+            call_getter(object, STR("IsDoorOpen"), open);
+
+            if (!door.seen || open != door.open)
+            {
+                const bool changed = door.seen;
+
+                door.seen = true;
+                door.open = open;
+
+                if (changed)
+                {
+                    const double x = sb_to_mc_x(at.X());
+                    const double y = sb_to_mc_y(at.Z());
+                    const double z = sb_to_mc_z(at.Y());
+
+                    collision::invalidate(x, y, z, kDoorRescanRadius);
+                    door_rescans.push_back({ x, y, z, now + kDoorMoveMs });
+                }
+            }
+        }
+    }
+
     // Finishes a hold-to-use interaction by calling what the game calls when
     // the hold bar is full. False if the object has no such thing.
     static auto complete_hold(RC::Unreal::UObject* target) -> bool
@@ -1772,13 +2700,1339 @@ public:
         return false;
     }
 
+    // What hiding Gregory leaves in view: the arm with his watch (a part of
+    // him the game keeps showing) and whatever he holds (its own actor).
+    static auto hide_extras(RC::Unreal::UObject* gregory, bool hide) -> void
+    {
+        if (auto* arm = gregory->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("RIG_FazWatchHand")); arm != nullptr && *arm != nullptr)
+        {
+            // SetHiddenInGame(bool NewHidden, bool bPropagateToChildren): two bytes.
+            call_with(*arm, STR("SetHiddenInGame"), static_cast<std::uint16_t>(hide ? 0x0101 : 0x0100));
+        }
+
+        if (auto* item = gregory->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("EquippedItem")); item != nullptr && *item != nullptr)
+        {
+            call_with(*item, STR("SetActorHiddenInGame"), hide);
+        }
+    }
+
+    // Minecraft's world moves a character: water carries it, a bubble column
+    // lifts it or drags it down, slime throws it up, and a hostile one is
+    // walked towards a villager. x, y, z in blocks, Minecraft's axes.
+    auto push_character(RC::Unreal::UObject* target, double x, double y, double z, std::uint32_t flags) -> void
+    {
+        if ((flags & 1) != 0)
+        {
+            if (auto* launch = target->GetFunctionByNameInChain(STR("LaunchCharacter")))
+            {
+                struct
+                {
+                    float LaunchVelocity[3];
+                    bool bXYOverride;
+                    bool bZOverride;
+                } params{ { 0.0f, 0.0f, kSlimeLaunch }, false, true };
+
+                target->ProcessEvent(launch, &params);
+            }
+
+            return;
+        }
+
+        auto* actor = reinterpret_cast<RC::Unreal::AActor*>(target);
+        const auto at = actor->K2_GetActorLocation();
+
+        if (y != 0.0)
+        {
+            // Going up or down in water: gravity would undo it between ticks.
+            // Same list as the boats: let go when Minecraft stops saying so.
+            const ULONGLONG tick = ::GetTickCount64();
+            auto known = std::find_if(captives.begin(), captives.end(), [target](const Captive& c) { return c.object.Get() == target; });
+
+            if (known == captives.end())
+            {
+                Captive afloat;
+
+                afloat.object = target;
+                captives.push_back(afloat);
+                known = captives.end() - 1;
+
+                set_movement_mode(target, kMoveFlying);
+
+                RC::Output::send<RC::LogLevel::Default>(
+                    STR("SBMP water: {} is carried {}\n"),
+                    target->GetFullName(),
+                    y > 0.0 ? STR("up") : STR("down")
+                );
+            }
+
+            known->seen = tick;
+        }
+
+        RC::Unreal::FVector to{
+            static_cast<float>(at.X() + x * skycraft::proto::kUnitsPerBlock),
+            static_cast<float>(at.Y() + kZSign * z * skycraft::proto::kUnitsPerBlock),
+            static_cast<float>(at.Z() + y * skycraft::proto::kUnitsPerBlock)
+        };
+
+        RC::Unreal::FHitResult sweep_hit{};
+
+        actor->K2_SetActorLocation(to, true, sweep_hit, false);
+
+        if ((flags & 2) != 0)
+        {
+            // Walking there: it looks where it goes.
+            face(target, static_cast<float>(std::atan2(kZSign * z, x) * 180.0 / 3.14159265358979323846));
+
+            static ULONGLONG last_log = 0;
+
+            if (::GetTickCount64() - last_log > 5000)
+            {
+                last_log = ::GetTickCount64();
+
+                RC::Output::send<RC::LogLevel::Default>(
+                    STR("SBMP villager: {} goes after one\n"),
+                    target->GetFullName()
+                );
+            }
+        }
+    }
+
+    static auto face(RC::Unreal::UObject* target, float yaw) -> void
+    {
+        struct
+        {
+            float NewRotation[3];
+            bool bTeleportPhysics;
+            bool ReturnValue;
+        } turn{ { 0.0f, yaw, 0.0f }, true, false };
+
+        if (auto* rotate = target->GetFunctionByNameInChain(STR("K2_SetActorRotation")))
+        {
+            target->ProcessEvent(rotate, &turn);
+        }
+    }
+
+    // A raised shield: the game is told Gregory can't be jumpscared (its own
+    // switch, CanBeJumpScared), and a character that comes within two
+    // blocks in front of the shield bounces off it, stunned.
+    auto update_shield(RC::Unreal::UObject* player, bool blocking) -> void
+    {
+        auto* scareable = player->GetValuePtrByPropertyNameInChain<bool>(STR("CanBeJumpScared"));
+
+        if (blocking != shield_up)
+        {
+            shield_up = blocking;
+
+            if (scareable != nullptr)
+            {
+                if (blocking)
+                {
+                    // Only handed back if it was on: a cutscene may have it off.
+                    shield_took_scare = *scareable;
+                    *scareable = false;
+                }
+                else if (shield_took_scare)
+                {
+                    *scareable = true;
+                }
+            }
+
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP shield: {}\n"),
+                blocking ? STR("up") : STR("down")
+            );
+        }
+
+        if (!blocking || !view.valid)
+        {
+            return;
+        }
+
+        // The game may switch it back on while the shield is still up.
+        if (scareable != nullptr && shield_took_scare)
+        {
+            *scareable = false;
+        }
+
+        const ULONGLONG tick = ::GetTickCount64();
+
+        if (tick - shield_bash_tick < kShieldBashMs)
+        {
+            return;
+        }
+
+        struct Shield
+        {
+            SecurityBreachMinecraftPassthrough* self;
+            double at[3];
+            double facing[2];
+            bool bashed;
+        } shield{ this, { view.position[0], view.position[1], view.position[2] }, { view.forward[0], view.forward[1] }, false };
+
+        actors::for_each(
+            [](RC::Unreal::UObject* character, void* context)
+            {
+                auto& shield = *static_cast<Shield*>(context);
+
+                // Freddy is a friend.
+                if (is_freddy(character))
+                {
+                    return;
+                }
+
+                const auto location = reinterpret_cast<RC::Unreal::AActor*>(character)->K2_GetActorLocation();
+                const double dx = location.X() - shield.at[0];
+                const double dy = location.Y() - shield.at[1];
+                const double dz = location.Z() - shield.at[2];
+                const double flat = std::sqrt(dx * dx + dy * dy);
+
+                // In front of the shield, not behind the player's back.
+                if (flat > kShieldReach || std::abs(dz) > kShieldReach || dx * shield.facing[0] + dy * shield.facing[1] < flat * 0.3)
+                {
+                    return;
+                }
+
+                shield.self->hit_character(character, dx, dy, 1.5);
+                shield.bashed = true;
+            },
+            &shield
+        );
+
+        if (shield.bashed)
+        {
+            shield_bash_tick = tick;
+            g_link.push_input(skycraft::proto::kInSwing, 0);
+        }
+    }
+
+    // Minecraft's spyglass narrows Minecraft's own view to a tenth; the
+    // picture is the game's, so the game's camera has to do the same.
+    auto update_spyglass(RC::Unreal::UObject* controller, bool scoping) -> void
+    {
+        if (scoping == spyglass_up)
+        {
+            return;
+        }
+
+        auto* manager = controller->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("PlayerCameraManager"));
+
+        if (manager == nullptr || *manager == nullptr)
+        {
+            return;
+        }
+
+        spyglass_up = scoping;
+
+        if (scoping)
+        {
+            float fov = 90.0f;
+
+            call_getter(*manager, STR("GetFOVAngle"), fov);
+            call_with(*manager, STR("SetFOV"), fov * 0.1f);
+        }
+        else if (auto* unlock = (*manager)->GetFunctionByNameInChain(STR("UnlockFOV")))
+        {
+            alignas(16) std::uint8_t no_params[16]{};
+
+            (*manager)->ProcessEvent(unlock, no_params);
+        }
+
+        RC::Output::send<RC::LogLevel::Default>(
+            STR("SBMP spyglass: {}\n"),
+            scoping ? STR("up, the game's camera zooms in") : STR("down")
+        );
+    }
+
+    // An elytra from a dispenser went on a character's stand-in, or came off.
+    auto set_wings(RC::Unreal::UObject* target, bool on) -> void
+    {
+        const ULONGLONG tick = ::GetTickCount64();
+        auto known = std::find_if(winged.begin(), winged.end(), [target](const Winged& w) { return w.object.Get() == target; });
+
+        if (!on)
+        {
+            if (known != winged.end())
+            {
+                set_movement_mode(target, kMoveFalling);
+                winged.erase(known);
+
+                RC::Output::send<RC::LogLevel::Default>(
+                    STR("SBMP wings: {} lost them\n"),
+                    target->GetFullName()
+                );
+            }
+
+            return;
+        }
+
+        if (known == winged.end())
+        {
+            Winged fresh;
+
+            fresh.object = target;
+            fresh.next_dive = tick + kWingDiveEveryMs;
+            winged.push_back(fresh);
+            known = winged.end() - 1;
+
+            set_movement_mode(target, kMoveFlying);
+
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP wings: {} flies, as {}\n"),
+                target->GetFullName(),
+                is_freddy(target) ? STR("an allay (stays with the player)") : STR("a phantom (circles and dives)")
+            );
+        }
+
+        known->seen = tick;
+    }
+
+    auto update_wings(RC::Unreal::UObject* player) -> void
+    {
+        const ULONGLONG tick = ::GetTickCount64();
+        const double dt = wings_tick == 0 ? 0.0 : (std::min)(static_cast<double>(tick - wings_tick) / 1000.0, 0.1);
+
+        wings_tick = tick;
+
+        if (winged.empty())
+        {
+            return;
+        }
+
+        const auto here = reinterpret_cast<RC::Unreal::AActor*>(player)->K2_GetActorLocation();
+
+        for (auto it = winged.begin(); it != winged.end();)
+        {
+            auto* target = it->object.Get();
+
+            if (target == nullptr || tick - it->seen > kWingTimeoutMs)
+            {
+                if (target != nullptr)
+                {
+                    set_movement_mode(target, kMoveFalling);
+                }
+
+                it = winged.erase(it);
+                continue;
+            }
+
+            auto* actor = reinterpret_cast<RC::Unreal::AActor*>(target);
+            const auto at = actor->K2_GetActorLocation();
+
+            double goal[3]{};
+            double speed = kWingSpeed;
+
+            it->angle += kWingTurn * dt;
+
+            if (is_freddy(target))
+            {
+                // An allay. Minecraft flies a real one for him and says where
+                // it is (kEvActorAt, the captives): then that is where he is.
+                if (std::any_of(captives.begin(), captives.end(), [target](const Captive& c) { return c.object.Get() == target; }))
+                {
+                    ++it;
+                    continue;
+                }
+
+                // Without one: a wide, slow circle round the player.
+                goal[0] = here.X() + std::cos(it->angle * 0.5) * 320.0;
+                goal[1] = here.Y() + std::sin(it->angle * 0.5) * 320.0;
+                goal[2] = here.Z() + 120.0 + std::sin(it->angle * 2.5) * 15.0;
+            }
+            else if (it->diving)
+            {
+                goal[0] = here.X();
+                goal[1] = here.Y();
+                goal[2] = here.Z();
+                speed = kWingDiveSpeed;
+
+                const double dx = here.X() - at.X();
+                const double dy = here.Y() - at.Y();
+                const double dz = here.Z() - at.Z();
+
+                if (tick > it->dive_until || dx * dx + dy * dy + dz * dz < 90.0 * 90.0)
+                {
+                    it->diving = false;
+                    it->next_dive = tick + kWingDiveEveryMs + (tick % 3000);
+                }
+            }
+            else
+            {
+                goal[0] = here.X() + std::cos(it->angle) * kWingRadius;
+                goal[1] = here.Y() + std::sin(it->angle) * kWingRadius;
+                goal[2] = here.Z() + kWingHeight;
+
+                if (tick > it->next_dive)
+                {
+                    it->diving = true;
+                    it->dive_until = tick + kWingDiveMs;
+                }
+            }
+
+            const double dx = goal[0] - at.X();
+            const double dy = goal[1] - at.Y();
+            const double dz = goal[2] - at.Z();
+            const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+            if (distance > 1.0)
+            {
+                const double step = (std::min)(distance, speed * dt) / distance;
+
+                move_actor(actor, at.X() + dx * step, at.Y() + dy * step, at.Z() + dz * step);
+
+                if (dx * dx + dy * dy > 4.0)
+                {
+                    face(target, static_cast<float>(std::atan2(dy, dx) * 180.0 / 3.14159265358979323846));
+                }
+            }
+
+            ++it;
+        }
+    }
+
+    // What the game's characters say is shown by its subtitle widgets
+    // (WI_Subtitles_C). Twice a second they are read; a line that wasn't
+    // there before goes to Minecraft's chat.
+    auto update_subtitles() -> void
+    {
+        const ULONGLONG tick = ::GetTickCount64();
+
+        if (tick - subtitles_tick < 500)
+        {
+            return;
+        }
+
+        subtitles_tick = tick;
+
+        // FString and TArray are a pointer and two counts.
+        struct RawArray
+        {
+            const std::uint8_t* data;
+            std::int32_t count;
+            std::int32_t room;
+        };
+
+        const auto text_of = [](const RawArray& string) -> std::wstring
+        {
+            if (string.data == nullptr || string.count <= 1 || string.count > 2048)
+            {
+                return {};
+            }
+
+            // The count includes the closing zero.
+            return std::wstring(reinterpret_cast<const wchar_t*>(string.data), static_cast<std::size_t>(string.count - 1));
+        };
+
+        std::vector<RC::Unreal::UObject*> widgets;
+
+        RC::Unreal::UObjectGlobals::FindAllOf(STR("WI_Subtitles_C"), widgets);
+
+        int widgets_seen = 0;
+        int widgets_with_text = 0;
+
+        for (auto* widget : widgets)
+        {
+            if (widget == nullptr)
+            {
+                continue;
+            }
+
+            auto* lines = widget->GetValuePtrByPropertyNameInChain<RawArray>(STR("P_Lines"));
+            auto* source = widget->GetValuePtrByPropertyNameInChain<RawArray>(STR("P_Source"));
+            auto* time = widget->GetValuePtrByPropertyNameInChain<float>(STR("P_Time"));
+
+            auto known = std::find_if(spoken.begin(), spoken.end(), [widget](const Spoken& s) { return s.widget.Get() == widget; });
+
+            if (known == spoken.end())
+            {
+                Spoken fresh;
+
+                fresh.widget = widget;
+                spoken.push_back(fresh);
+                known = spoken.end() - 1;
+            }
+
+            // What is on screen is the surest: the widget's own text block.
+            // Its text is only turned into a string when it was set anew.
+            std::vector<std::wstring> shown;
+            bool said_again = false;
+
+            static auto* get_text = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UFunction*>(
+                nullptr, nullptr, STR("/Script/UMG.RichTextBlock:GetText"));
+            static auto* to_string = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UFunction*>(
+                nullptr, nullptr, STR("/Script/Engine.KismetTextLibrary:Conv_TextToString"));
+            static auto* text_library = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UObject*>(
+                nullptr, nullptr, STR("/Script/Engine.Default__KismetTextLibrary"));
+
+            if (auto* block = widget->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("RichText"));
+                block != nullptr && *block != nullptr && get_text != nullptr && to_string != nullptr && text_library != nullptr)
+            {
+                // (FText InText, FString ReturnValue): an FText is 0x18 bytes,
+                // its first pointer is the text itself.
+                alignas(16) std::uint8_t params[0x40]{};
+
+                (*block)->ProcessEvent(get_text, params);
+
+                const void* text_data = nullptr;
+
+                std::memcpy(&text_data, params, sizeof(text_data));
+
+                if (text_data != nullptr && text_data != known->rich_data)
+                {
+                    known->rich_data = text_data;
+
+                    text_library->ProcessEvent(to_string, params);
+
+                    RawArray string{};
+
+                    std::memcpy(&string, params + 0x18, sizeof(string));
+
+                    std::vector<std::wstring> fresh_lines;
+                    std::wstring line;
+
+                    for (const wchar_t c : text_of(string) + L"\n")
+                    {
+                        if (c == L'\n' || c == L'\r')
+                        {
+                            if (!line.empty())
+                            {
+                                fresh_lines.push_back(line);
+                                line.clear();
+                            }
+                        }
+                        else
+                        {
+                            line += c;
+                        }
+                    }
+
+                    // Set anew to the very same words: the line was said again.
+                    said_again = !fresh_lines.empty() && fresh_lines == known->rich_lines;
+                    known->rich_lines = std::move(fresh_lines);
+                }
+
+                shown = known->rich_lines;
+            }
+
+            // Otherwise S_SubtitleLine: a start time, then the text. The widget
+            // shows a few lines at a time and drops the ones that were said.
+            if (shown.empty() && lines != nullptr && lines->data != nullptr && lines->count > 0 && lines->count <= 64)
+            {
+                for (std::int32_t i = 0; i < lines->count; ++i)
+                {
+                    RawArray string{};
+
+                    std::memcpy(&string, lines->data + i * 0x18 + 0x8, sizeof(string));
+
+                    if (auto line = text_of(string); !line.empty())
+                    {
+                        shown.push_back(std::move(line));
+                    }
+                }
+            }
+
+            // Short ones may only have the plain list of strings.
+            if (auto* strings = widget->GetValuePtrByPropertyNameInChain<RawArray>(STR("P_LineStrings"));
+                shown.empty() && strings != nullptr && strings->data != nullptr && strings->count > 0 && strings->count <= 64)
+            {
+                for (std::int32_t i = 0; i < strings->count; ++i)
+                {
+                    RawArray string{};
+
+                    std::memcpy(&string, strings->data + i * 0x10, sizeof(string));
+
+                    if (auto line = text_of(string); !line.empty())
+                    {
+                        shown.push_back(std::move(line));
+                    }
+                }
+            }
+
+            ++widgets_seen;
+
+            if (shown.empty())
+            {
+                continue;
+            }
+
+            ++widgets_with_text;
+
+            const float now_at = time != nullptr ? *time : 0.0f;
+            // The same words again count when the widget's clock started over.
+            const bool again = said_again || now_at + 0.25f < known->time;
+
+            known->time = now_at;
+
+            // Only the lines that weren't there the last time.
+            std::wstring text;
+
+            for (const auto& line : shown)
+            {
+                if (again || std::find(known->lines.begin(), known->lines.end(), line) == known->lines.end())
+                {
+                    text += text.empty() ? L"" : L" ";
+                    text += line;
+                }
+            }
+
+            known->lines = std::move(shown);
+
+            if (text.empty())
+            {
+                continue;
+            }
+
+            // Rich text marks (<Italic>...</>) aren't words.
+            std::wstring plain;
+            bool in_mark = false;
+
+            for (const wchar_t c : text)
+            {
+                if (c == L'<')
+                {
+                    in_mark = true;
+                }
+                else if (c == L'>' && in_mark)
+                {
+                    in_mark = false;
+                }
+                else if (!in_mark)
+                {
+                    plain += c;
+                }
+            }
+
+            const auto who = source != nullptr ? text_of(*source) : std::wstring{};
+            const std::wstring message = (who.empty() ? L"" : L"<" + who + L"> ") + plain;
+
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP said: {}\n"),
+                message
+            );
+
+            // Twelve characters per message, latin-1.
+            const std::uint16_t code = chat_line++;
+
+            for (std::size_t at = 0; at < message.size() && at < 240; at += 12)
+            {
+                std::int32_t words[3]{};
+
+                for (std::size_t i = 0; i < 12 && at + i < message.size(); ++i)
+                {
+                    wchar_t c = message[at + i];
+
+                    // Curly quotes and the long dash have plain cousins.
+                    c = c == 0x2019 || c == 0x2018 ? L'\'' : c == 0x201C || c == 0x201D ? L'"' : c == 0x2014 || c == 0x2013 ? L'-' : c == 0x2026 ? L'.' : c;
+
+                    words[i / 4] |= static_cast<std::int32_t>((c < 256 ? c : L'?') & 0xFF) << ((i % 4) * 8);
+                }
+
+                g_link.push_input(skycraft::proto::kInChatText, code, words[0], words[1], words[2]);
+            }
+
+            g_link.push_input(skycraft::proto::kInChatSay, code);
+        }
+
+        spoken.erase(
+            std::remove_if(spoken.begin(), spoken.end(), [](const Spoken& s) { return s.widget.Get() == nullptr; }),
+            spoken.end()
+        );
+
+        // To learn why a character's line didn't make it: was there a widget
+        // with its words at all?
+        static ULONGLONG last_count = 0;
+
+        if (tick - last_count > 10000)
+        {
+            last_count = tick;
+
+            RC::Output::send<RC::LogLevel::Verbose>(
+                STR("SBMP subtitles: {} widgets, {} with text\n"),
+                widgets_seen,
+                widgets_with_text
+            );
+        }
+    }
+
+    // Characters on a lead follow the player: further than the lead is
+    // long and they are pulled along, stopping at walls.
+    auto update_leads(RC::Unreal::UObject* player) -> void
+    {
+        const ULONGLONG tick = ::GetTickCount64();
+
+        for (auto it = leashed.begin(); it != leashed.end();)
+        {
+            auto* target = it->object.Get();
+
+            // Minecraft repeats where the other end is every tick; silence
+            // means the lead is gone.
+            if (target == nullptr || tick - it->seen > kLeadTimeoutMs)
+            {
+                it = leashed.erase(it);
+                continue;
+            }
+
+            auto* actor = reinterpret_cast<RC::Unreal::AActor*>(target);
+            const auto at = actor->K2_GetActorLocation();
+
+            const double dx = it->post[0] - at.X();
+            const double dy = it->post[1] - at.Y();
+            const double dz = it->post[2] - at.Z();
+            const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+            if (distance > kLeadLength)
+            {
+                // Onto the end of the lead. Height only follows when the
+                // other end is well above (the player flies): then it dangles.
+                const double pull = (distance - kLeadLength) / distance;
+                const bool lifted = dz > kLeadLength;
+
+                RC::Unreal::FVector to{
+                    static_cast<float>(at.X() + dx * pull),
+                    static_cast<float>(at.Y() + dy * pull),
+                    static_cast<float>(lifted ? at.Z() + dz * pull : at.Z())
+                };
+
+                RC::Unreal::FHitResult sweep_hit{};
+
+                actor->K2_SetActorLocation(to, true, sweep_hit, false);
+            }
+
+            ++it;
+        }
+    }
+
+    // A character whose stand-in sits in a boat or minecart stays where
+    // that is, for as long as Minecraft keeps saying so.
+    auto hold_captive(RC::Unreal::UObject* target, double x, double y, double z) -> void
+    {
+        const ULONGLONG tick = ::GetTickCount64();
+        auto known = std::find_if(captives.begin(), captives.end(), [target](const Captive& c) { return c.object.Get() == target; });
+
+        if (known == captives.end())
+        {
+            Captive captive;
+
+            captive.object = target;
+            captives.push_back(captive);
+            known = captives.end() - 1;
+
+            set_movement_mode(target, kMoveFlying);
+
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP captive: Minecraft carries {} (a boat, a minecart, an allay or a chicken)\n"),
+                target->GetFullName()
+            );
+        }
+
+        known->seen = tick;
+
+        move_actor(
+            reinterpret_cast<RC::Unreal::AActor*>(target),
+            mc_to_sb_x(x),
+            mc_to_sb_z(z),
+            mc_to_sb_y(y) + capsule_half_height(target)
+        );
+    }
+
+    // Lets go of the ones Minecraft stopped reporting (the boat broke).
+    auto release_captives() -> void
+    {
+        const ULONGLONG tick = ::GetTickCount64();
+
+        for (auto it = captives.begin(); it != captives.end();)
+        {
+            auto* target = it->object.Get();
+
+            if (target == nullptr || tick - it->seen > kCaptiveTimeoutMs)
+            {
+                if (target != nullptr)
+                {
+                    set_movement_mode(target, kMoveFalling);
+                }
+
+                it = captives.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    }
+
+    static auto is_freddy(RC::Unreal::UObject* who) -> bool
+    {
+        return lower(who->GetClassPrivate()->GetName()).find(L"freddy") != std::wstring::npos;
+    }
+
+    // While the player rides Freddy's mule in Minecraft, Freddy is kept
+    // under the rider: Minecraft's mule does the moving, Freddy is its body.
+    auto update_ride(const skycraft::proto::McState& mc, float yaw) -> void
+    {
+        const bool riding = minecraft_mode && driving && (mc.flags & skycraft::proto::kMcRidingHost) != 0;
+        auto* target = freddy.Get();
+
+        // Minecraft's player sits on the mule but which Freddy it is got
+        // lost (a new level, a restart): the one that is around.
+        if (riding && target == nullptr)
+        {
+            RC::Unreal::UObject* found = nullptr;
+
+            actors::for_each(
+                [](RC::Unreal::UObject* character, void* context)
+                {
+                    if (is_freddy(character))
+                    {
+                        *static_cast<RC::Unreal::UObject**>(context) = character;
+                    }
+                },
+                &found
+            );
+
+            if (found != nullptr)
+            {
+                freddy = found;
+                target = found;
+            }
+        }
+
+        if (!riding || target == nullptr)
+        {
+            if (riding_freddy)
+            {
+                riding_freddy = false;
+
+                // Back on his own feet, his own movement.
+                if (target != nullptr)
+                {
+                    set_movement_mode(target, kMoveFalling);
+                }
+
+                RC::Output::send<RC::LogLevel::Default>(
+                    STR("SBMP ride: got off Freddy\n")
+                );
+            }
+
+            return;
+        }
+
+        auto* actor = reinterpret_cast<RC::Unreal::AActor*>(target);
+        const double half = capsule_half_height(target);
+
+        if (!riding_freddy)
+        {
+            riding_freddy = true;
+            set_movement_mode(target, kMoveFlying);
+
+            // How far above Freddy's feet Minecraft seats its rider: measured
+            // once, while he still stands where the mule was put.
+            // Kept for the next time: after the first ride Freddy is where
+            // the rider put him, not where the mule was put.
+            const auto at = actor->K2_GetActorLocation();
+            const double measured = mc_to_sb_y(mc.y) - (at.Z() - half);
+
+            if (seat_height < 30.0 && measured > 30.0)
+            {
+                seat_height = measured;
+            }
+            else if (seat_height < 30.0)
+            {
+                seat_height = kDefaultSeat;
+            }
+
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP ride: on Freddy, the seat is {} units up\n"),
+                seat_height
+            );
+        }
+
+        move_actor(actor, mc_to_sb_x(mc.x), mc_to_sb_z(mc.z), mc_to_sb_y(mc.y) - seat_height + half);
+
+        // He faces where the rider looks.
+        struct
+        {
+            float NewRotation[3];
+            bool bTeleportPhysics;
+            bool ReturnValue;
+        } turn{ { 0.0f, yaw, 0.0f }, true, false };
+
+        if (auto* rotate = target->GetFunctionByNameInChain(STR("K2_SetActorRotation")))
+        {
+            target->ProcessEvent(rotate, &turn);
+        }
+    }
+
+    // A broken object isn't destroyed: it is hidden and stops colliding, and
+    // Minecraft drops a paper with its name. Using that paper on the floor
+    // puts the very same object back (put_back), so nothing about it is lost.
+    auto take_away(RC::Unreal::UObject* target, double x, double y, double z, bool in_bucket = false) -> void
+    {
+        call_with(target, STR("SetActorHiddenInGame"), true);
+        call_with(target, STR("SetActorEnableCollision"), false);
+
+        if (in_bucket)
+        {
+            // A character would walk on unseen: it stops thinking and moving,
+            // and Minecraft keeps no stand-in for it.
+            call_with(target, STR("SetActorTickEnabled"), false);
+            set_movement_mode(target, kMoveNone);
+            actors::ignore(target, true);
+        }
+
+        const std::uint32_t id = make_token(target, in_bucket, true);
+
+        if (in_bucket)
+        {
+            g_link.push_input(skycraft::proto::kInBucketToken, static_cast<std::uint16_t>(id));
+            return;
+        }
+
+        g_link.push_input(
+            skycraft::proto::kInDropToken,
+            static_cast<std::uint16_t>(id),
+            static_cast<std::int32_t>(sb_to_mc_x(x) * 100.0),
+            static_cast<std::int32_t>(sb_to_mc_y(z) * 100.0),
+            static_cast<std::int32_t>(sb_to_mc_z(y) * 100.0)
+        );
+    }
+
+    // Remembers an object or character under a new number and tells
+    // Minecraft its name. `taken`: it is gone from the level until it is put
+    // back; otherwise the number only stands for copies of it.
+    auto make_token(RC::Unreal::UObject* target, bool is_character, bool taken) -> std::uint32_t
+    {
+        Token token;
+
+        token.character = is_character;
+        token.taken_away = taken;
+        token.id = next_token++;
+        token.object = target;
+        token.object_class = target->GetClassPrivate();
+
+        // A plain static mesh actor is nothing without its mesh.
+        if (auto* component = target->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("StaticMeshComponent")); component != nullptr && *component != nullptr)
+        {
+            if (auto* mesh = (*component)->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("StaticMesh")); mesh != nullptr)
+            {
+                token.mesh = *mesh;
+            }
+        }
+        tokens.push_back(token);
+
+        // "MOD_SpaceFreddy_Cutout4" -> "SpaceFreddy Cutout"
+        std::wstring name = target->GetName();
+
+        for (const wchar_t* prefix : { L"PRE_MOD_", L"MOD_", L"PRE_", L"SM_", L"BP_" })
+        {
+            if (name.rfind(prefix, 0) == 0)
+            {
+                name.erase(0, std::wcslen(prefix));
+                break;
+            }
+        }
+
+        while (!name.empty() && (std::iswdigit(name.back()) || name.back() == L'_'))
+        {
+            name.pop_back();
+        }
+
+        for (auto& c : name)
+        {
+            if (c == L'_')
+            {
+                c = L' ';
+            }
+        }
+
+        // Twelve characters per message, latin-1.
+        for (std::size_t at = 0; at < name.size() && at < 48; at += 12)
+        {
+            std::int32_t words[3]{};
+
+            for (std::size_t i = 0; i < 12 && at + i < name.size(); ++i)
+            {
+                const wchar_t c = name[at + i];
+
+                words[i / 4] |= static_cast<std::int32_t>((c < 256 ? c : L'?') & 0xFF) << ((i % 4) * 8);
+            }
+
+            g_link.push_input(skycraft::proto::kInTokenName, static_cast<std::uint16_t>(token.id), words[0], words[1], words[2]);
+        }
+
+        return token.id;
+    }
+
+    // Creative, a short click of the middle button: Minecraft's "pick block"
+    // for the game's things. A character gives its spawn egg, something that
+    // can be broken gives its paper; both make copies and leave it standing.
+    auto pick_target(RC::Unreal::UObject* character) -> void
+    {
+        if (g_link.minecraft_targets_block())
+        {
+            return;
+        }
+
+        double to[3]{};
+
+        for (int i = 0; i < 3; ++i)
+        {
+            to[i] = view.position[i] + view.forward[i] * kUseReach;
+        }
+
+        RC::Unreal::UObject* part = nullptr;
+        double impact[3]{};
+        auto* target = collision::trace(character, view.position, to, kAttackThickness, &part, impact);
+
+        if (target == nullptr)
+        {
+            return;
+        }
+
+        const bool is_character = target->GetFunctionByNameInChain(STR("GetController")) != nullptr;
+
+        if (!is_character && break_hits(target, part) == 0)
+        {
+            return;
+        }
+
+        const std::uint32_t id = make_token(target, is_character, false);
+
+        g_link.push_input(skycraft::proto::kInPickToken, static_cast<std::uint16_t>(id), is_character ? 1 : 0);
+
+        RC::Output::send<RC::LogLevel::Default>(
+            STR("SBMP pick: {} of {}\n"),
+            is_character ? STR("the spawn egg") : STR("the paper"),
+            target->GetFullName()
+        );
+    }
+
+    // The paper of a broken object, used on the floor: the object stands
+    // there again, facing the player.
+    auto put_back(std::uint32_t id, RC::Unreal::UObject* character) -> bool
+    {
+        auto token = std::find_if(tokens.begin(), tokens.end(), [id](const Token& t) { return t.id == id; });
+
+        if (token == tokens.end())
+        {
+            return false;
+        }
+
+        double to[3]{};
+
+        for (int i = 0; i < 3; ++i)
+        {
+            to[i] = view.position[i] + view.forward[i] * kUseReach;
+        }
+
+        double impact[3]{};
+
+        if (collision::trace(character, view.position, to, 0.0, nullptr, impact) == nullptr)
+        {
+            return false;
+        }
+
+        auto* target = token->object.Get();
+        const bool original = token->taken_away && target != nullptr;
+
+        if (original)
+        {
+            // A character stands on the spot; an object's own origin goes there.
+            const double lift = token->character ? capsule_half_height(target) + 5.0 : 0.0;
+
+            move_actor(reinterpret_cast<RC::Unreal::AActor*>(target), impact[0], impact[1], impact[2] + lift);
+            token->taken_away = false;
+
+            if (token->character)
+            {
+                call_with(target, STR("SetActorTickEnabled"), true);
+                set_movement_mode(target, kMoveFalling);
+                actors::ignore(target, false);
+            }
+        }
+        else
+        {
+            // A copy: the original stands somewhere already, or is gone with
+            // the part of the level it was in.
+            auto* object_class = token->object_class.Get();
+
+            // A character's origin is its middle: up it goes, or it spawns in the floor.
+            const double spot[3] = { impact[0], impact[1], impact[2] + (token->character ? 100.0 : 0.0) };
+
+            target = object_class != nullptr ? spawn_actor(character, object_class, spot) : nullptr;
+
+            if (target == nullptr)
+            {
+                RC::Output::send<RC::LogLevel::Default>(
+                    STR("SBMP token: couldn't make another of paper {}\n"),
+                    id
+                );
+
+                return false;
+            }
+
+            if (auto* mesh = token->mesh.Get())
+            {
+                if (auto* component = target->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("StaticMeshComponent")); component != nullptr && *component != nullptr)
+                {
+                    // A level's static meshes can't change; a movable one can.
+                    call_with(*component, STR("SetMobility"), std::uint8_t{ 2 });
+                    call_with(*component, STR("SetStaticMesh"), mesh);
+                }
+            }
+        }
+
+        // Turned to face the player, like a placed block that has a front.
+        const float yaw = static_cast<float>(std::atan2(-view.forward[1], -view.forward[0]) * 180.0 / 3.14159265358979323846);
+
+        struct
+        {
+            float NewRotation[3];
+            bool bTeleportPhysics;
+            bool ReturnValue;
+        } turn{ { 0.0f, yaw, 0.0f }, true, false };
+
+        if (auto* rotate = target->GetFunctionByNameInChain(STR("K2_SetActorRotation")))
+        {
+            target->ProcessEvent(rotate, &turn);
+        }
+
+        call_with(target, STR("SetActorEnableCollision"), true);
+        call_with(target, STR("SetActorHiddenInGame"), false);
+
+        g_link.push_input(skycraft::proto::kInUseToken, static_cast<std::uint16_t>(id));
+        g_link.push_input(skycraft::proto::kInSwing, 0);
+
+        RC::Output::send<RC::LogLevel::Default>(
+            STR("SBMP token: {} {}\n"),
+            original ? STR("put back") : STR("made a copy of"),
+            target->GetFullName()
+        );
+
+        return true;
+    }
+
+    // Creative: the middle button picks up a character or a loose object and
+    // carries it in front of the camera; letting go drops (or throws) it.
+    auto update_grab(RC::Unreal::UObject* character) -> void
+    {
+        // A short click picks (like Minecraft's pick block); holding carries.
+        const bool down = creative_mode && driving && view.valid && input::grab_held();
+        const ULONGLONG grab_now = ::GetTickCount64();
+
+        if (down && !grab_was_down)
+        {
+            grab_down_tick = grab_now;
+        }
+        else if (!down && grab_was_down && grab_now - grab_down_tick < kPickClickMs && creative_mode && view.valid)
+        {
+            pick_target(character);
+        }
+
+        grab_was_down = down;
+
+        const bool held = down && grab_now - grab_down_tick >= kPickClickMs;
+
+        if (!held)
+        {
+            if (auto* pawn = grabbed_pawn.Get())
+            {
+                set_movement_mode(pawn, kMoveFalling);
+            }
+
+            grabbed_pawn = RC::Unreal::FWeakObjectPtr{};
+            grabbed_part = RC::Unreal::FWeakObjectPtr{};
+            grab_tried = false;
+            return;
+        }
+
+        if (grabbed_pawn.Get() == nullptr && grabbed_part.Get() == nullptr)
+        {
+            if (grab_tried)
+            {
+                return;
+            }
+
+            // One look per press.
+            grab_tried = true;
+
+            double to[3]{};
+
+            for (int i = 0; i < 3; ++i)
+            {
+                to[i] = view.position[i] + view.forward[i] * kUseReach;
+            }
+
+            RC::Unreal::UObject* part = nullptr;
+            double impact[3]{};
+            auto* target = collision::trace(character, view.position, to, kAttackThickness, &part, impact);
+
+            if (target == nullptr)
+            {
+                return;
+            }
+
+            const double dx = impact[0] - view.position[0];
+            const double dy = impact[1] - view.position[1];
+            const double dz = impact[2] - view.position[2];
+
+            grab_distance = (std::max)(std::sqrt(dx * dx + dy * dy + dz * dz), kGrabMinDistance);
+
+            if (target->GetFunctionByNameInChain(STR("GetController")) != nullptr)
+            {
+                grabbed_pawn = target;
+                set_movement_mode(target, kMoveFlying);
+            }
+            else if (part != nullptr && is_simulating(part))
+            {
+                grabbed_part = part;
+            }
+            else
+            {
+                return;
+            }
+
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP grab: picked up {}\n"),
+                target->GetFullName()
+            );
+        }
+
+        const double hold[3] = {
+            view.position[0] + view.forward[0] * grab_distance,
+            view.position[1] + view.forward[1] * grab_distance,
+            view.position[2] + view.forward[2] * grab_distance,
+        };
+
+        if (auto* pawn = grabbed_pawn.Get())
+        {
+            // A character: hangs there, its feet off the ground.
+            move_actor(reinterpret_cast<RC::Unreal::AActor*>(pawn), hold[0], hold[1], hold[2]);
+            return;
+        }
+
+        if (auto* part = grabbed_part.Get())
+        {
+            // A physics object: pulled towards the spot, so it still bumps
+            // into things, and flies on when let go.
+            float where[3]{};
+
+            if (!call_getter(part, STR("K2_GetComponentLocation"), where))
+            {
+                return;
+            }
+
+            auto* push = part->GetFunctionByNameInChain(STR("SetPhysicsLinearVelocity"));
+
+            if (push == nullptr)
+            {
+                return;
+            }
+
+            // (FVector NewVel, bool bAddToCurrent, FName BoneName)
+            struct
+            {
+                float NewVel[3];
+                bool bAddToCurrent;
+                std::uint8_t padding[3];
+                std::uint32_t BoneName[2];
+            } params{
+                {
+                    static_cast<float>((hold[0] - where[0]) * kGrabPull),
+                    static_cast<float>((hold[1] - where[1]) * kGrabPull),
+                    static_cast<float>((hold[2] - where[2]) * kGrabPull)
+                },
+                false,
+                {},
+                { 0, 0 }
+            };
+
+            part->ProcessEvent(push, &params);
+        }
+    }
+
+    // UPrimitiveComponent::IsSimulatingPhysics(None).
+    static auto is_simulating(RC::Unreal::UObject* component) -> bool
+    {
+        auto* simulating = component->GetFunctionByNameInChain(STR("IsSimulatingPhysics"));
+
+        if (simulating == nullptr)
+        {
+            return false;
+        }
+
+        struct
+        {
+            std::uint32_t BoneName[2];
+            bool ReturnValue;
+        } query{};
+
+        component->ProcessEvent(simulating, &query);
+
+        return query.ReturnValue;
+    }
+
+    // The building itself is never broken, only things that stand in it.
+    // The level's big merged meshes, floors, walls and colliders are out by
+    // name, and so is anything larger than a prop (over ~14 blocks across).
+    static auto is_loose_prop(RC::Unreal::UObject* actor) -> bool
+    {
+        static constexpr const wchar_t* kBuilding[] = {
+            L"merged", L"floor", L"wall", L"ceiling", L"collider", L"blockingvolume", L"landscape", L"stair",
+            L"platform", L"ramp", L"pillar", L"column", L"ground", L"roof", L"bridge", L"elevator"
+        };
+
+        const auto name = lower(actor->GetFullName());
+
+        for (const auto* word : kBuilding)
+        {
+            if (name.find(word) != std::wstring::npos)
+            {
+                return false;
+            }
+        }
+
+        auto* bounds = actor->GetFunctionByNameInChain(STR("GetActorBounds"));
+
+        if (bounds == nullptr)
+        {
+            return false;
+        }
+
+        struct
+        {
+            bool bOnlyCollidingComponents;
+            float Origin[3];
+            float BoxExtent[3];
+            bool bIncludeFromChildActors;
+        } query{};
+
+        actor->ProcessEvent(bounds, &query);
+
+        return query.BoxExtent[0] < kMaxPropExtent && query.BoxExtent[1] < kMaxPropExtent && query.BoxExtent[2] < kMaxPropExtent;
+    }
+
     // How many hits it takes in survival to break this, 0 if it can't be
-    // broken: the cardboard cutouts, and doors (a lot more work).
+    // broken: the cardboard cutouts, fences, and statues and doors (a lot
+    // more work).
     static auto break_hits(RC::Unreal::UObject* actor, RC::Unreal::UObject* component) -> int
     {
         if (is_cutout(actor, component))
         {
             return kBreakHits;
+        }
+
+        if (is_fence(actor, component))
+        {
+            return kFenceBreakHits;
+        }
+
+        if (is_statue(actor, component))
+        {
+            return kStatueBreakHits;
+        }
+
+        if (is_furniture(actor, component))
+        {
+            return kFenceBreakHits;
         }
 
         return actor->GetFunctionByNameInChain(STR("ForceDoorOpen")) != nullptr ? kDoorBreakHits : 0;
@@ -1790,7 +4044,43 @@ public:
     {
         static constexpr const wchar_t* kWords[] = { L"cutout", L"cut_out", L"standee", L"cardboard" };
 
-        const auto named = [](RC::Unreal::UObject* object)
+        return is_named(actor, component, kWords);
+    }
+
+    // Fences, railings and rope barriers that stand in the level as their
+    // own object. A guess by name, like the cutouts.
+    static auto is_fence(RC::Unreal::UObject* actor, RC::Unreal::UObject* component) -> bool
+    {
+        static constexpr const wchar_t* kWords[] = { L"fence", L"railing", L"barricade", L"stanchion", L"rope_barrier", L"ropebarrier", L"barrier" };
+
+        return is_named(actor, component, kWords) && is_loose_prop(actor);
+    }
+
+    static auto is_statue(RC::Unreal::UObject* actor, RC::Unreal::UObject* component) -> bool
+    {
+        static constexpr const wchar_t* kWords[] = { L"statue", L"sculpture", L"mannequin", L"bust_" };
+
+        return is_named(actor, component, kWords) && is_loose_prop(actor);
+    }
+
+    // Furniture and decoration: plants, tables, chairs, bins, signs,
+    // balloons, arcade machines. Also a guess by name; nothing a player
+    // stands on or needs (no counters, platforms, presents or boxes).
+    static auto is_furniture(RC::Unreal::UObject* actor, RC::Unreal::UObject* component) -> bool
+    {
+        static constexpr const wchar_t* kWords[] = {
+            L"palmtree", L"plant", L"table", L"chair", L"stool", L"bench", L"trash", L"sign", L"balloon",
+            L"arcade", L"stroller", L"cone", L"poster", L"banner"
+        };
+
+        return is_named(actor, component, kWords) && is_loose_prop(actor);
+    }
+
+    // The name of the actor, or of the mesh it shows, has one of the words.
+    template <std::size_t N>
+    static auto is_named(RC::Unreal::UObject* actor, RC::Unreal::UObject* component, const wchar_t* const (&words)[N]) -> bool
+    {
+        const auto named = [&words](RC::Unreal::UObject* object)
         {
             if (object == nullptr)
             {
@@ -1799,7 +4089,7 @@ public:
 
             const auto name = lower(object->GetFullName());
 
-            for (const auto* word : kWords)
+            for (const auto* word : words)
             {
                 if (name.find(word) != std::wstring::npos)
                 {
@@ -1824,6 +4114,129 @@ public:
         }
 
         return false;
+    }
+
+    // (FVector or FRotator, bool bSweep, FHitResult& SweepHitResult, bool bTeleport):
+    // K2_SetRelativeLocation and K2_SetRelativeRotation of a scene component.
+    static auto set_relative(RC::Unreal::UObject* component, const wchar_t* name, float a, float b, float c) -> void
+    {
+        auto* function = component->GetFunctionByNameInChain(name);
+
+        if (function == nullptr)
+        {
+            return;
+        }
+
+        struct
+        {
+            float value[3];
+            bool bSweep;
+            std::uint8_t SweepHitResult[0x88];
+            bool bTeleport;
+            std::uint8_t padding[0x40];
+        } params{};
+
+        params.value[0] = a;
+        params.value[1] = b;
+        params.value[2] = c;
+        params.bTeleport = true;
+
+        component->ProcessEvent(function, &params);
+    }
+
+    // Turns a character's body upside down (or back): its mesh is rolled
+    // over and lifted by its own height, the collision capsule stays as it is.
+    auto flip_character(RC::Unreal::UObject* target) -> bool
+    {
+        auto* mesh = target->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("Mesh"));
+
+        if (mesh == nullptr || *mesh == nullptr)
+        {
+            return false;
+        }
+
+        auto* place = (*mesh)->GetValuePtrByPropertyNameInChain<float>(STR("RelativeLocation"));
+        auto* turn = (*mesh)->GetValuePtrByPropertyNameInChain<float>(STR("RelativeRotation"));
+
+        if (place == nullptr || turn == nullptr)
+        {
+            return false;
+        }
+
+        // Already upside down: put it back.
+        for (auto it = flipped.begin(); it != flipped.end(); ++it)
+        {
+            if (it->object.Get() != target)
+            {
+                continue;
+            }
+
+            // FRotator is pitch, yaw, roll.
+            set_relative(*mesh, STR("K2_SetRelativeRotation"), turn[0], turn[1], turn[2] - 180.0f);
+            set_relative(*mesh, STR("K2_SetRelativeLocation"), it->home[0], it->home[1], it->home[2]);
+            flipped.erase(it);
+
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP name tag: {} is the right way up again\n"),
+                target->GetFullName()
+            );
+
+            return true;
+        }
+
+        // The mesh hangs at the character's feet, so rolled over it would
+        // point into the floor: mirror its place in the capsule, which puts
+        // the feet where the head was.
+        Flipped flip;
+
+        flip.object = target;
+        flip.home[0] = place[0];
+        flip.home[1] = place[1];
+        flip.home[2] = place[2];
+        flip.lifted = place[2] < 0.0f ? -place[2] : place[2] + static_cast<float>(capsule_half_height(target) * 2.0);
+
+        set_relative(*mesh, STR("K2_SetRelativeRotation"), turn[0], turn[1], turn[2] + 180.0f);
+        set_relative(*mesh, STR("K2_SetRelativeLocation"), flip.home[0], flip.home[1], flip.lifted);
+
+        RC::Output::send<RC::LogLevel::Default>(
+            STR("SBMP name tag: {} is upside down (mesh height {} -> {})\n"),
+            target->GetFullName(),
+            flip.home[2],
+            flip.lifted
+        );
+
+        flipped.push_back(flip);
+
+        return true;
+    }
+
+    // The game puts a character's mesh back in its usual place while it
+    // animates, which sinks an upside-down one into the floor. This runs
+    // after the game's own tick and lifts them again.
+    auto hold_flipped() -> void
+    {
+        for (auto it = flipped.begin(); it != flipped.end();)
+        {
+            auto* target = it->object.Get();
+
+            if (target == nullptr)
+            {
+                it = flipped.erase(it);
+                continue;
+            }
+
+            if (auto* mesh = target->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("Mesh")); mesh != nullptr && *mesh != nullptr)
+            {
+                auto* place = (*mesh)->GetValuePtrByPropertyNameInChain<float>(STR("RelativeLocation"));
+
+                if (place != nullptr && std::abs(place[2] - it->lifted) > 0.5f)
+                {
+                    set_relative(*mesh, STR("K2_SetRelativeLocation"), it->home[0], it->home[1], it->lifted);
+                }
+            }
+
+            ++it;
+        }
     }
 
     // Loose things the game simulates (balls, cups, toys) fly off when hit.
@@ -1940,6 +4353,109 @@ public:
 
         for (int i = 0; i < 64 && g_link.read_event(event); ++i)
         {
+            if (event.type == skycraft::proto::kEvRedstone)
+            {
+                const std::array<int, 3> block{
+                    static_cast<int>(std::lround(event.a)),
+                    static_cast<int>(std::lround(event.b)),
+                    static_cast<int>(std::lround(event.c))
+                };
+
+                const auto known = std::find(redstone.begin(), redstone.end(), block);
+
+                if (event.flags != 0 && known == redstone.end())
+                {
+                    redstone.push_back(block);
+                }
+                else if (event.flags == 0 && known != redstone.end())
+                {
+                    redstone.erase(known);
+                }
+
+                continue;
+            }
+
+            if (event.type == skycraft::proto::kEvActorAt)
+            {
+                // Stuck in a boat or minecart in Minecraft: that is where it is.
+                if (auto* target = actors::find(event.formId))
+                {
+                    hold_captive(target, event.a, event.b, event.c);
+                }
+
+                continue;
+            }
+
+            if (event.type == skycraft::proto::kEvLeash)
+            {
+                // Minecraft's lead on a character: where its other end is
+                // (the player's hand or a knot on a fence), or that it is off.
+                auto* target = actors::find(event.formId);
+                auto known = std::find_if(leashed.begin(), leashed.end(), [target](const Lead& l) { return l.object.Get() == target; });
+
+                if (target == nullptr || (event.flags & 1) == 0)
+                {
+                    if (target != nullptr && known != leashed.end())
+                    {
+                        leashed.erase(known);
+
+                        RC::Output::send<RC::LogLevel::Default>(
+                            STR("SBMP lead: {} is off the lead\n"),
+                            target->GetFullName()
+                        );
+                    }
+
+                    continue;
+                }
+
+                if (known == leashed.end())
+                {
+                    Lead lead;
+
+                    lead.object = target;
+                    leashed.push_back(lead);
+                    known = leashed.end() - 1;
+
+                    RC::Output::send<RC::LogLevel::Default>(
+                        STR("SBMP lead: {} is on the lead\n"),
+                        target->GetFullName()
+                    );
+                }
+
+                known->post[0] = mc_to_sb_x(event.a);
+                known->post[1] = mc_to_sb_z(event.c);
+                known->post[2] = mc_to_sb_y(event.b);
+                known->seen = ::GetTickCount64();
+
+                continue;
+            }
+
+            // Everything else only means something while the player is Steve.
+            if (!minecraft_mode)
+            {
+                continue;
+            }
+
+            if (event.type == skycraft::proto::kEvActorPush)
+            {
+                if (auto* target = actors::find(event.formId))
+                {
+                    push_character(target, event.a, event.b, event.c, event.flags);
+                }
+
+                continue;
+            }
+
+            if (event.type == skycraft::proto::kEvActorWings)
+            {
+                if (auto* target = actors::find(event.formId))
+                {
+                    set_wings(target, (event.flags & 1) != 0);
+                }
+
+                continue;
+            }
+
             if (event.type == skycraft::proto::kEvHitActor)
             {
                 auto* target = actors::find(event.formId);
@@ -2008,6 +4524,78 @@ public:
                     },
                     &blast
                 );
+
+                break_with_blast(blast.centre, blast.reach * 0.6);
+            }
+        }
+    }
+
+    // An explosion breaks what a hand can break (cutouts, doors, fences,
+    // statues) and what it can see: rays go out from its centre in 26
+    // directions, and the first thing each one meets breaks if it is of
+    // that kind. So a wall shelters what is behind it, and the building
+    // itself is never touched.
+    auto break_with_blast(const double centre[3], double reach) -> void
+    {
+        auto* player = last_character;
+
+        if (player == nullptr)
+        {
+            return;
+        }
+
+        std::vector<RC::Unreal::UObject*> broken;
+
+        for (int dx = -1; dx <= 1; ++dx)
+        {
+            for (int dy = -1; dy <= 1; ++dy)
+            {
+                for (int dz = -1; dz <= 1; ++dz)
+                {
+                    if (dx == 0 && dy == 0 && dz == 0)
+                    {
+                        continue;
+                    }
+
+                    const double length = std::sqrt(static_cast<double>(dx * dx + dy * dy + dz * dz));
+                    const double to[3] = {
+                        centre[0] + dx / length * reach,
+                        centre[1] + dy / length * reach,
+                        centre[2] + dz / length * reach,
+                    };
+
+                    RC::Unreal::UObject* part = nullptr;
+                    auto* target = collision::trace(player, centre, to, kAttackThickness, &part);
+
+                    if (
+                        target == nullptr ||
+                        target->GetFunctionByNameInChain(STR("GetController")) != nullptr ||
+                        break_hits(target, part) == 0 ||
+                        std::find(broken.begin(), broken.end(), target) != broken.end()
+                    )
+                    {
+                        continue;
+                    }
+
+                    broken.push_back(target);
+
+                    const auto spot = reinterpret_cast<RC::Unreal::AActor*>(target)->K2_GetActorLocation();
+
+                    RC::Output::send<RC::LogLevel::Default>(
+                        STR("SBMP explosion: broke {}\n"),
+                        target->GetFullName()
+                    );
+
+                    g_link.push_input(
+                        skycraft::proto::kInBreakEffect,
+                        0,
+                        static_cast<std::int32_t>(sb_to_mc_x(spot.X()) * 100.0),
+                        static_cast<std::int32_t>(sb_to_mc_y(spot.Z()) * 100.0),
+                        static_cast<std::int32_t>(sb_to_mc_z(spot.Y()) * 100.0)
+                    );
+
+                    take_away(target, spot.X(), spot.Y(), spot.Z());
+                }
             }
         }
     }

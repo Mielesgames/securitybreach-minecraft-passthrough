@@ -344,6 +344,8 @@ public final class SkyClient {
 				server.execute(() -> server.getCommands().performPrefixedCommand(server.createCommandSourceStack().withSuppressedOutput(), "time set midnight"));
 			}
 		}
+		reportRedstone(minecraft, player);
+		flyFreddy(player);
 		if (player.isDeadOrDying()) {
 			// Nothing here is meant to kill the player, and the death screen can't be seen: get up again.
 			player.respawn();
@@ -361,9 +363,101 @@ public final class SkyClient {
 			return;
 		}
 		passthroughHold = null;
-		if (sky.hostDrives() && !teleportPending) {
+		// On the hiding seat the player is a passenger: the seat holds them, not the pin.
+		if (sky.hostDrives() && !teleportPending && !(player.getVehicle() instanceof net.minecraft.world.entity.decoration.ArmorStand)) {
 			pin(player, sky.x, sky.y, sky.z);
 		}
+	}
+
+	/**
+	 * Freddy with an elytra on (a dispenser puts it on his mule) flies: Space goes up, the sprint
+	 * key down, forward goes where the rider looks. Without wings he is a mule again.
+	 */
+	private static void flyFreddy(LocalPlayer player) {
+		if (!(player.getVehicle() instanceof net.minecraft.world.entity.animal.equine.Mule mule) || !dev.skycraft.combat.FreddyMount.isFreddy(mule)) {
+			return;
+		}
+		boolean wings = mule.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.CHEST).is(net.minecraft.world.item.Items.ELYTRA);
+		mule.setNoGravity(wings);
+		if (!wings) {
+			return;
+		}
+		var keys = player.input.keyPresses;
+		double vy = keys.jump() ? 0.45 : keys.sprint() ? -0.45 : 0.0;
+		Vec3 motion = mule.getDeltaMovement();
+		if (keys.forward()) {
+			Vec3 look = player.getLookAngle();
+			motion = new Vec3(look.x * 0.9, vy, look.z * 0.9);
+		} else {
+			motion = new Vec3(motion.x * 0.8, vy, motion.z * 0.8);
+		}
+		mule.setDeltaMovement(motion);
+		mule.resetFallDistance();
+	}
+
+	// Redstone sources that are on, as the host game was last told.
+	private static final it.unimi.dsi.fastutil.longs.LongOpenHashSet POWERED = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+	private static int redstoneTick;
+
+	/**
+	 * Security Breach's doors answer to Minecraft's redstone: every powered source around the player
+	 * (a lever, a pressed button or plate, lit dust, a redstone block or torch) is reported when it
+	 * switches, and the host opens the doors near it.
+	 */
+	private static void reportRedstone(Minecraft minecraft, LocalPlayer player) {
+		if (redstoneTick++ % 5 != 0 || minecraft.level == null) {
+			return;
+		}
+		var level = minecraft.level;
+		var now = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+		net.minecraft.core.BlockPos centre = player.blockPosition();
+		net.minecraft.core.BlockPos.MutableBlockPos pos = new net.minecraft.core.BlockPos.MutableBlockPos();
+		for (int dy = -6; dy <= 6; dy++) {
+			for (int dz = -16; dz <= 16; dz++) {
+				for (int dx = -16; dx <= 16; dx++) {
+					pos.set(centre.getX() + dx, centre.getY() + dy, centre.getZ() + dz);
+					var state = level.getBlockState(pos);
+					if (!state.isAir() && powers(state)) {
+						now.add(pos.asLong());
+					}
+				}
+			}
+		}
+		for (long key : now) {
+			if (POWERED.add(key)) {
+				SkyLink.pushEvent(Proto.EV_REDSTONE, 0, net.minecraft.core.BlockPos.getX(key), net.minecraft.core.BlockPos.getY(key), net.minecraft.core.BlockPos.getZ(key), 0, 1);
+			}
+		}
+		var it = POWERED.iterator();
+		while (it.hasNext()) {
+			long key = it.nextLong();
+			if (!now.contains(key)) {
+				it.remove();
+				SkyLink.pushEvent(Proto.EV_REDSTONE, 0, net.minecraft.core.BlockPos.getX(key), net.minecraft.core.BlockPos.getY(key), net.minecraft.core.BlockPos.getZ(key), 0, 0);
+			}
+		}
+	}
+
+	private static boolean powers(net.minecraft.world.level.block.state.BlockState state) {
+		if (state.is(net.minecraft.world.level.block.Blocks.REDSTONE_BLOCK)) {
+			return true;
+		}
+		// Doors, trapdoors and gates are powered themselves when something else powers them: not a source.
+		if (state.getBlock() instanceof net.minecraft.world.level.block.DoorBlock
+			|| state.getBlock() instanceof net.minecraft.world.level.block.TrapDoorBlock
+			|| state.getBlock() instanceof net.minecraft.world.level.block.FenceGateBlock) {
+			return false;
+		}
+		if (state.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.POWERED)
+			&& state.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.POWERED)) {
+			return true;
+		}
+		if (state.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.POWER)
+			&& state.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.POWER) > 0) {
+			return true;
+		}
+		return (state.is(net.minecraft.world.level.block.Blocks.REDSTONE_TORCH) || state.is(net.minecraft.world.level.block.Blocks.REDSTONE_WALL_TORCH))
+			&& state.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.LIT);
 	}
 
 	private static void pin(LocalPlayer player, double x, double y, double z) {
@@ -445,6 +539,37 @@ public final class SkyClient {
 			}
 			if (player.getMainHandItem().is(net.minecraft.tags.ItemTags.SWORDS)) {
 				flags |= Proto.MC_HOLDS_SWORD;
+			}
+			mc.heldToken = dev.skycraft.SkyCraft.tokenOf(player.getMainHandItem());
+			if (dev.skycraft.combat.FreddyMount.isFreddy(player.getVehicle())) {
+				flags |= Proto.MC_RIDING_HOST;
+			}
+			if (player.getVehicle() instanceof net.minecraft.world.entity.decoration.ArmorStand) {
+				flags |= Proto.MC_HIDING;
+			}
+			if (player.isBlocking()) {
+				flags |= Proto.MC_BLOCKING;
+			}
+			if (player.isScoping()) {
+				flags |= Proto.MC_SCOPING;
+			}
+			if (player.getMainHandItem().is(net.minecraft.world.item.Items.LEAD)) {
+				flags |= Proto.MC_HOLDS_LEAD;
+			}
+			var server = minecraft.getSingleplayerServer();
+			if (server != null && !server.overworld().getGameRules().get(dev.skycraft.SkyCraft.ALLOW_OPENING_DOORS)) {
+				flags |= Proto.MC_DOORS_LOCKED;
+			}
+			// A plain water bucket (not one that already holds a character) scoops one up.
+			if (mc.heldToken == 0 && player.getMainHandItem().is(net.minecraft.world.item.Items.WATER_BUCKET)
+				&& (server == null || server.overworld().getGameRules().get(dev.skycraft.SkyCraft.ALLOW_ANIMATRONIC_WATER_BUCKET))) {
+				flags |= Proto.MC_HOLDS_BUCKET;
+			}
+			if (player.getMainHandItem().is(net.minecraft.world.item.Items.NAME_TAG)) {
+				String tag = player.getMainHandItem().getHoverName().getString();
+				if (tag.equalsIgnoreCase("Dinnerbone") || tag.equalsIgnoreCase("Grumm")) {
+					flags |= Proto.MC_HOLDS_FLIP_TAG;
+				}
 			}
 			mc.x = feet.x;
 			mc.y = feet.y;
