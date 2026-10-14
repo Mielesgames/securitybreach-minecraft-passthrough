@@ -107,6 +107,8 @@ namespace skycraft::proto
 		kMcHoldsSword = 1u << 11,  // a sword in the main hand: in creative it breaks nothing
 		kMcHoldsFlipTag = 1u << 12,  // a name tag named Dinnerbone or Grumm in the main hand
 		kMcDoorsLocked = 1u << 13,   // gamerule skycraft:allow_opening_doors is off
+		kMcPumpkin = 1u << 21,       // a carved pumpkin on the head: host characters see the player less far
+		kMcHoldsShears = 1u << 20,   // shears in the main hand: right-click takes a host character's elytra off
 		kMcBlocking = 1u << 19,      // a shield is up: host characters in front bounce off it and can't grab the player
 		kMcScoping = 1u << 18,       // looking through a spyglass: the host zooms its camera in too
 		kMcHoldsBucket = 1u << 17,   // a water bucket in the main hand, and the gamerule lets it scoop up a host character
@@ -196,11 +198,13 @@ namespace skycraft::proto
 		kInSwing = 9,        // swing the main hand (the player used something in the host game)
 		kInTokenName = 11,   // part of a broken object's name: code = token id, a, b, c = 12 characters (latin-1, 0 = end)
 		kInDropToken = 12,   // drop the paper for a broken object: code = token id, a, b, c = where (Minecraft x 100)
+		kInShear = 21,       // shears on host character a (its ActorTable id): its stand-in drops what it wears
 		kInLeash = 20,       // code 1: put Minecraft's lead on the host character a (its ActorTable id), held by the
 		                     // player; code 0: take it off
 		kInPickToken = 19,   // creative pick: give the item that makes copies of a host thing (code = token, named by
 		                     // kInTokenName). a = 1: a character (a spawn egg), 0: an object (its paper)
-		kInChatSay = 18,     // show the text gathered under this code (kInChatText) in the chat
+		kInChatSay = 18,     // show the text gathered under this code (kInChatText) in the chat; a = 1: in yellow
+		                     // ("... joined the game")
 		kInChatText = 17,    // twelve more characters (a, b, c, latin-1) of a chat line; code = which line
 		kInBucketToken = 16, // a host character was scooped up: the water bucket in hand becomes its bucket
 		                     // (code = token, named by kInTokenName). Using it puts the character back.

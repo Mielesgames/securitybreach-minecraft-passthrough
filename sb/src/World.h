@@ -73,5 +73,14 @@ namespace world
     void shapes_in(const double low[3], const double high[3], std::vector<std::array<float, 6>>& out);
 
     // Lets go of the game's device context again.
+    // Holes in the game's world (Minecraft's inverted blocks): its geometry
+    // there doesn't count. Any thread.
+    bool dug_at(int x, int y, int z);
+    bool any_dug();
+
+    // Sections (Minecraft section coordinates) whose holes changed since the
+    // last call, so the collision there can be felt out again. Game thread.
+    void take_dug_changes(std::vector<std::array<int, 3>>& out);
+
     void shutdown();
 }

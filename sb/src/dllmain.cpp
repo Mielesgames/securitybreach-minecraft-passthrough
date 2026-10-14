@@ -288,6 +288,43 @@ public:
     bool shield_took_scare = false;
     ULONGLONG shield_bash_tick = 0;
 
+    bool holds_shears = false;
+
+    // Who of the game's cast is around, for "... joined the game" (by object,
+    // with the name the chat uses). The first look after the player appears
+    // only takes stock: whoever is there already was there.
+    struct Present
+    {
+        RC::Unreal::FWeakObjectPtr object;
+        std::wstring name;
+    };
+
+    std::vector<Present> present;
+    RC::Unreal::UObject* roster_player = nullptr;
+    bool roster_taken = false;
+    ULONGLONG roster_tick = 0;
+
+    // Characters' sight shortened while the player wears a pumpkin, with
+    // how far each saw before.
+    struct Dimmed
+    {
+        RC::Unreal::FWeakObjectPtr sight;
+        float end_distance = 0.0f;
+    };
+
+    std::vector<Dimmed> dimmed;
+    ULONGLONG pumpkin_tick = 0;
+
+    // Things squashed a little by a blow, put back after a moment.
+    struct Squashed
+    {
+        RC::Unreal::FWeakObjectPtr object;
+        float scale[3]{};
+        ULONGLONG until = 0;
+    };
+
+    std::vector<Squashed> squashed;
+
     // Minecraft's spyglass is at the eye.
     bool spyglass_up = false;
 
@@ -418,7 +455,11 @@ public:
     bool minecraft_mode = false;
     bool minecraft_launch_started = false;
     bool f6_was_down = false;
-    bool f6_waiting = false;
+    // Minecraft mode starts by itself once Minecraft and the game are ready
+    // (the player's wish, 14 Oct); F6 turns it off and on, and that choice
+    // holds until the next F6.
+    bool f6_waiting = true;
+    bool steve_wanted = true;
     // The game shows its mouse pointer: one of its own screens is up.
     bool game_screen_open = false;
     // The game is letting the player walk (see where it is set).
@@ -1006,6 +1047,7 @@ public:
             if (!minecraft_mode && !minecraft_ready)
             {
                 f6_waiting = !f6_waiting;
+                steve_wanted = f6_waiting;
 
                 // Minecraft takes a while to start and open its world.
                 RC::Output::send<RC::LogLevel::Default>(
@@ -1026,6 +1068,12 @@ public:
 
                 minecraft_mode = !minecraft_mode;
 
+                // Only a press is the player's choice, not the start by itself.
+                if (!waiting_f6_now_ready)
+                {
+                    steve_wanted = minecraft_mode;
+                }
+
                 RC::Output::send<RC::LogLevel::Default>(
                     STR("SBMP Minecraft mode: {}\n"),
                     minecraft_mode ? STR("ON") : STR("OFF")
@@ -1045,6 +1093,8 @@ public:
         if (minecraft_mode && (::GetAsyncKeyState(VK_F7) & 0x8000) != 0)
         {
             minecraft_mode = false;
+            steve_wanted = false;
+            f6_waiting = false;
 
             RC::Output::send<RC::LogLevel::Default>(
                 STR("SBMP Minecraft mode: OFF (F7)\n")
@@ -1071,6 +1121,8 @@ public:
             else if (minecraft_mode && now - watch_tick > 3000)
             {
                 minecraft_mode = false;
+                // Back by itself once Minecraft is, unless F6 turned it off.
+                f6_waiting = steve_wanted;
 
                 RC::Output::send<RC::LogLevel::Default>(
                     STR("SBMP Minecraft stopped responding, mode OFF\n")
@@ -1483,12 +1535,37 @@ public:
         // Minecraft has to stay known.
         handle_events();
 
+        update_roster(first_person_character);
+
+        // Inverted blocks placed or broken: the game's collision there changes.
+        {
+            std::vector<std::array<int, 3>> changed;
+
+            world::take_dug_changes(changed);
+
+            for (const auto& section : changed)
+            {
+                collision::invalidate(section[0] * 16 + 8.0, section[1] * 16 + 8.0, section[2] * 16 + 8.0, 12.0);
+            }
+
+            if (!changed.empty())
+            {
+                RC::Output::send<RC::LogLevel::Default>(
+                    STR("SBMP holes: {} sections changed, their collision is felt out again\n"),
+                    changed.size()
+                );
+            }
+        }
+        update_pumpkin(minecraft_mode && (mc_state.flags & skycraft::proto::kMcPumpkin) != 0);
+        update_wobbles();
+
         creative_mode = (mc_state.flags & skycraft::proto::kMcCreative) != 0;
         holds_sword = (mc_state.flags & skycraft::proto::kMcHoldsSword) != 0;
         holds_flip_tag = (mc_state.flags & skycraft::proto::kMcHoldsFlipTag) != 0;
         doors_locked = (mc_state.flags & skycraft::proto::kMcDoorsLocked) != 0;
         holds_lead = (mc_state.flags & skycraft::proto::kMcHoldsLead) != 0;
         holds_bucket = (mc_state.flags & skycraft::proto::kMcHoldsBucket) != 0;
+        holds_shears = (mc_state.flags & skycraft::proto::kMcHoldsShears) != 0;
         held_token = mc_state.heldToken;
 
         if (back_after_hiding)
@@ -1854,6 +1931,12 @@ public:
             }
             else if (target != nullptr)
             {
+                // It can't break, but it gives a little under the blow.
+                if (!repeat)
+                {
+                    wobble(target);
+                }
+
                 // What the swing reached instead, to learn what the game's bots are made of.
                 RC::Output::send<RC::LogLevel::Verbose>(
                     STR("SBMP hit: the swing only reached {}\n"),
@@ -1889,6 +1972,31 @@ public:
 
                 g_link.push_input(skycraft::proto::kInSwing, 0);
                 input::consume_use_click();
+                return;
+            }
+        }
+
+        // Shears on a character with wings: they come off (Minecraft drops them).
+        if (holds_shears)
+        {
+            double far_end[3]{};
+
+            reach(kUseReach, far_end);
+
+            auto* who = collision::trace(character, view.position, far_end, kAttackThickness);
+            const std::uint32_t id = who != nullptr ? actors::id_of(who) : 0;
+
+            if (id != 0)
+            {
+                g_link.push_input(skycraft::proto::kInShear, 0, static_cast<std::int32_t>(id));
+                g_link.push_input(skycraft::proto::kInSwing, 0);
+                input::consume_use_click();
+
+                RC::Output::send<RC::LogLevel::Default>(
+                    STR("SBMP shears: on {}\n"),
+                    who->GetFullName()
+                );
+
                 return;
             }
         }
@@ -2809,6 +2917,327 @@ public:
         if (auto* rotate = target->GetFunctionByNameInChain(STR("K2_SetActorRotation")))
         {
             target->ProcessEvent(rotate, &turn);
+        }
+    }
+
+    // The chat name of one of the game's cast, from its class: "Moon",
+    // "Glamrock Chica"... Empty for everyone else (bots, helpers).
+    static auto cast_name(RC::Unreal::UObject* who) -> std::wstring
+    {
+        static const std::pair<const wchar_t*, const wchar_t*> kCast[] = {
+            { L"gregory", L"Gregory" }, { L"vanessa", L"Vanessa" }, { L"vanny", L"Vanny" },
+            { L"musicman", L"DJ Music Man" }, { L"moon", L"Moon" }, { L"sun", L"Sun" },
+            { L"freddy", L"Glamrock Freddy" }, { L"chica", L"Glamrock Chica" }, { L"monty", L"Montgomery Gator" },
+            { L"roxy", L"Roxanne Wolf" }, { L"endo", L"Endo" }, { L"blob", L"The Blob" }, { L"burntrap", L"Burntrap" },
+        };
+
+        const auto name = lower(who->GetClassPrivate()->GetName());
+
+        if (name.find(L"enterexit") != std::wstring::npos || name.find(L"jumpscare") != std::wstring::npos)
+        {
+            return {};
+        }
+
+        for (const auto& [word, shown] : kCast)
+        {
+            if (name.find(word) != std::wstring::npos)
+            {
+                return shown;
+            }
+        }
+
+        return {};
+    }
+
+    // One line in Minecraft's chat, in yellow when `yellow`.
+    auto say_in_chat(const std::wstring& message, bool yellow) -> void
+    {
+        const std::uint16_t code = chat_line++;
+
+        for (std::size_t at = 0; at < message.size() && at < 240; at += 12)
+        {
+            std::int32_t words[3]{};
+
+            for (std::size_t i = 0; i < 12 && at + i < message.size(); ++i)
+            {
+                const wchar_t c = message[at + i];
+
+                words[i / 4] |= static_cast<std::int32_t>((c < 256 ? c : L'?') & 0xFF) << ((i % 4) * 8);
+            }
+
+            g_link.push_input(skycraft::proto::kInChatText, code, words[0], words[1], words[2]);
+        }
+
+        g_link.push_input(skycraft::proto::kInChatSay, code, yellow ? 1 : 0);
+    }
+
+    // "Moon joined the game", "Moon left the game", like players in
+    // Minecraft. Once a second; the player's own Gregory joins too.
+    auto update_roster(RC::Unreal::UObject* player) -> void
+    {
+        const ULONGLONG tick = ::GetTickCount64();
+
+        if (tick - roster_tick < 1000)
+        {
+            return;
+        }
+
+        roster_tick = tick;
+
+        if (player != roster_player)
+        {
+            // A new Gregory (start, respawn, another level): take stock again.
+            roster_player = player;
+            roster_taken = false;
+            present.clear();
+
+            if (player != nullptr && lower(player->GetClassPrivate()->GetName()).rfind(L"gregory", 0) == 0)
+            {
+                say_in_chat(L"Gregory joined the game", true);
+            }
+        }
+
+        if (player == nullptr)
+        {
+            return;
+        }
+
+        std::vector<RC::Unreal::UObject*> pawns;
+
+        RC::Unreal::UObjectGlobals::FindAllOf(STR("Pawn"), pawns);
+
+        for (auto it = present.begin(); it != present.end();)
+        {
+            auto* object = it->object.Get();
+
+            if (object == nullptr || std::find(pawns.begin(), pawns.end(), object) == pawns.end())
+            {
+                say_in_chat(it->name + L" left the game", true);
+                it = present.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+
+        for (auto* pawn : pawns)
+        {
+            if (pawn == nullptr || pawn == player)
+            {
+                continue;
+            }
+
+            if (std::any_of(present.begin(), present.end(), [pawn](const Present& p) { return p.object.Get() == pawn; }))
+            {
+                continue;
+            }
+
+            auto name = cast_name(pawn);
+
+            if (name.empty())
+            {
+                continue;
+            }
+
+            if (roster_taken)
+            {
+                say_in_chat(name + L" joined the game", true);
+
+                RC::Output::send<RC::LogLevel::Default>(
+                    STR("SBMP roster: {} joined ({})\n"),
+                    name,
+                    pawn->GetFullName()
+                );
+            }
+
+            Present fresh;
+
+            fresh.object = pawn;
+            fresh.name = std::move(name);
+            present.push_back(std::move(fresh));
+        }
+
+        roster_taken = true;
+    }
+
+    // A carved pumpkin on Steve's head: like an enderman, the game's
+    // characters see him less well. Their sight reaches a third as far
+    // (the game's own USightComponent), and back when the pumpkin comes off.
+    auto update_pumpkin(bool wearing) -> void
+    {
+        const ULONGLONG tick = ::GetTickCount64();
+
+        if (!wearing)
+        {
+            if (!dimmed.empty())
+            {
+                for (auto& d : dimmed)
+                {
+                    if (auto* sight = d.sight.Get())
+                    {
+                        if (auto* end = sight->GetValuePtrByPropertyNameInChain<float>(STR("EndDistance")))
+                        {
+                            *end = d.end_distance;
+                        }
+                    }
+                }
+
+                dimmed.clear();
+
+                RC::Output::send<RC::LogLevel::Default>(
+                    STR("SBMP pumpkin: off, the characters see as far as before\n")
+                );
+            }
+
+            return;
+        }
+
+        if (tick - pumpkin_tick < 1000)
+        {
+            return;
+        }
+
+        pumpkin_tick = tick;
+
+        static auto* sight_class = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UClass*>(
+            nullptr, nullptr, STR("/Script/fnaf9.SightComponent"));
+
+        if (sight_class == nullptr)
+        {
+            return;
+        }
+
+        struct Pumpkin
+        {
+            SecurityBreachMinecraftPassthrough* self;
+            RC::Unreal::UClass* sight_class;
+            int newly;
+        } pumpkin{ this, sight_class, 0 };
+
+        actors::for_each(
+            [](RC::Unreal::UObject* character, void* context)
+            {
+                auto& pumpkin = *static_cast<Pumpkin*>(context);
+                auto* get = character->GetFunctionByNameInChain(STR("GetComponentByClass"));
+
+                if (get == nullptr)
+                {
+                    return;
+                }
+
+                RC::Output::send<RC::LogLevel::Verbose>(
+                    STR("SBMP pumpkin: looking at the sight of {}\n"),
+                    character->GetFullName()
+                );
+
+                // (TSubclassOf<UActorComponent> ComponentClass, UActorComponent* ReturnValue)
+                struct
+                {
+                    RC::Unreal::UClass* ComponentClass;
+                    RC::Unreal::UObject* ReturnValue;
+                } query{ pumpkin.sight_class, nullptr };
+
+                character->ProcessEvent(get, &query);
+
+                auto* sight = query.ReturnValue;
+
+                if (sight == nullptr || std::any_of(pumpkin.self->dimmed.begin(), pumpkin.self->dimmed.end(), [sight](const Dimmed& d) { return d.sight.Get() == sight; }))
+                {
+                    return;
+                }
+
+                auto* end = sight->GetValuePtrByPropertyNameInChain<float>(STR("EndDistance"));
+
+                if (end == nullptr)
+                {
+                    return;
+                }
+
+                Dimmed d;
+
+                d.sight = sight;
+                d.end_distance = *end;
+                pumpkin.self->dimmed.push_back(d);
+
+                *end = d.end_distance / 3.0f;
+                ++pumpkin.newly;
+            },
+            &pumpkin
+        );
+
+        if (pumpkin.newly != 0)
+        {
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP pumpkin: {} more characters see a third as far\n"),
+                pumpkin.newly
+            );
+        }
+    }
+
+    // A blow on something that can't break squashes it a little for a
+    // moment, if it is one that may move at all (most of the level is fixed
+    // in place, and stays as it is).
+    auto wobble(RC::Unreal::UObject* target) -> void
+    {
+        auto* root = target->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("RootComponent"));
+
+        if (root == nullptr || *root == nullptr)
+        {
+            return;
+        }
+
+        // EComponentMobility: 2 = Movable.
+        auto* mobility = (*root)->GetValuePtrByPropertyNameInChain<std::uint8_t>(STR("Mobility"));
+
+        if (mobility == nullptr || *mobility != 2 || std::any_of(squashed.begin(), squashed.end(), [target](const Squashed& s) { return s.object.Get() == target; }))
+        {
+            return;
+        }
+
+        Squashed squash;
+
+        squash.object = target;
+        squash.until = ::GetTickCount64() + 160;
+
+        if (!call_getter(target, STR("GetActorScale3D"), squash.scale))
+        {
+            return;
+        }
+
+        squashed.push_back(squash);
+
+        RC::Output::send<RC::LogLevel::Default>(
+            STR("SBMP hit: {} gives a little under the blow\n"),
+            target->GetFullName()
+        );
+
+        const float flat[3] = { squash.scale[0] * 1.06f, squash.scale[1] * 1.06f, squash.scale[2] * 0.9f };
+
+        call_with(target, STR("SetActorScale3D"), *reinterpret_cast<const std::array<float, 3>*>(flat));
+    }
+
+    auto update_wobbles() -> void
+    {
+        const ULONGLONG tick = ::GetTickCount64();
+
+        for (auto it = squashed.begin(); it != squashed.end();)
+        {
+            auto* target = it->object.Get();
+
+            if (target == nullptr)
+            {
+                it = squashed.erase(it);
+            }
+            else if (tick >= it->until)
+            {
+                call_with(target, STR("SetActorScale3D"), *reinterpret_cast<const std::array<float, 3>*>(it->scale));
+                it = squashed.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
         }
     }
 
@@ -4307,6 +4736,19 @@ public:
         }
 
         strength = std::clamp(strength, 0.5, 3.0);
+
+        // Carried by Minecraft (a chicken jockey, a boat, an allay): it is
+        // Minecraft that throws the carrier, and the character rides along.
+        // Thrown here as well, it would fly off and leave its chicken behind.
+        if (std::any_of(captives.begin(), captives.end(), [target](const Captive& c) { return c.object.Get() == target; }))
+        {
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP hit: {} is carried by Minecraft, its ride is thrown instead\n"),
+                target->GetFullName()
+            );
+
+            return;
+        }
 
         if (auto* launch = target->GetFunctionByNameInChain(STR("LaunchCharacter")))
         {

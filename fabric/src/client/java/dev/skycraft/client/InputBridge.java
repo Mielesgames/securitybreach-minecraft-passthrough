@@ -105,6 +105,14 @@ public final class InputBridge {
 					});
 				}
 			}
+			case Proto.IN_SHEAR -> {
+				// Shears on a Security Breach character: what its stand-in wears (an elytra) comes off.
+				var server = minecraft.getSingleplayerServer();
+				if (server != null) {
+					int formId = a;
+					server.execute(() -> dev.skycraft.combat.SkyCombat.shear(formId));
+				}
+			}
 			case Proto.IN_LEASH -> {
 				// The player used a lead on a Security Breach character, or took it off.
 				var server = minecraft.getSingleplayerServer();
@@ -157,7 +165,9 @@ public final class InputBridge {
 				// Something a Security Breach character said (its subtitle): into the chat.
 				var text = CHAT_LINES.remove(code);
 				if (text != null && !text.isEmpty()) {
-					minecraft.gui.hud.getChat().addClientSystemMessage(net.minecraft.network.chat.Component.literal(text.toString()));
+					var line = net.minecraft.network.chat.Component.literal(text.toString());
+					// Someone arriving or leaving is yellow, like a player joining.
+					minecraft.gui.hud.getChat().addClientSystemMessage(a == 1 ? line.withStyle(net.minecraft.ChatFormatting.YELLOW) : line);
 				}
 			}
 			case Proto.IN_HIDE -> {

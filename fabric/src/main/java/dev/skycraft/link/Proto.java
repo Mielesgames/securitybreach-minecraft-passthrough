@@ -52,6 +52,7 @@ public final class Proto {
 	public static final int IN_CHAT_SAY = 18;
 	public static final int IN_PICK_TOKEN = 19;
 	public static final int IN_LEASH = 20;
+	public static final int IN_SHEAR = 21;
 	public static final int HURT_MELEE = 0;
 	public static final int HURT_PROJECTILE = 1;
 	public static final int HURT_MAGIC = 2;
@@ -225,6 +226,8 @@ public final class Proto {
 	public static final int MC_HOLDS_BUCKET = 1 << 17;
 	public static final int MC_SCOPING = 1 << 18;
 	public static final int MC_BLOCKING = 1 << 19;
+	public static final int MC_HOLDS_SHEARS = 1 << 20;
+	public static final int MC_PUMPKIN = 1 << 21;
 
 	// Overlay
 	public static final long OC_STATE = 0x00;

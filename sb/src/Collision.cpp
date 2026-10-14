@@ -3,6 +3,7 @@
 #endif
 
 #include "Collision.h"
+#include "World.h"
 
 #include <DynamicOutput/DynamicOutput.hpp>
 
@@ -262,6 +263,35 @@ namespace collision
         // Is anything that blocks a pawn inside this cube of cells?
         bool box_blocked(RC::Unreal::UObject* character, int cx, int cy, int cz, int size)
         {
+            // Inside Minecraft's inverted blocks the game's geometry is dug away.
+            if (world::any_dug())
+            {
+                const int x0 = cx / kCellsPerBlock - (cx < 0 && cx % kCellsPerBlock != 0);
+                const int y0 = cy / kCellsPerBlock - (cy < 0 && cy % kCellsPerBlock != 0);
+                const int z0 = cz / kCellsPerBlock - (cz < 0 && cz % kCellsPerBlock != 0);
+                const int x1 = (cx + size - 1) / kCellsPerBlock - (cx + size - 1 < 0 && (cx + size - 1) % kCellsPerBlock != 0);
+                const int y1 = (cy + size - 1) / kCellsPerBlock - (cy + size - 1 < 0 && (cy + size - 1) % kCellsPerBlock != 0);
+                const int z1 = (cz + size - 1) / kCellsPerBlock - (cz + size - 1 < 0 && (cz + size - 1) % kCellsPerBlock != 0);
+
+                bool all_dug = true;
+
+                for (int by = y0; by <= y1 && all_dug; ++by)
+                {
+                    for (int bz = z0; bz <= z1 && all_dug; ++bz)
+                    {
+                        for (int bx = x0; bx <= x1 && all_dug; ++bx)
+                        {
+                            all_dug = world::dug_at(bx, by, bz);
+                        }
+                    }
+                }
+
+                if (all_dug)
+                {
+                    return false;
+                }
+            }
+
             const double half = size * kCellUnits * 0.5;
             const double ux = cx * kCellUnits + half;
             const double uy = cz * kCellUnits + half;

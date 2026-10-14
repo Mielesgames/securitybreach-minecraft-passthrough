@@ -1,3 +1,4 @@
 {
-  "entity.skycraft.skyrim_actor": "Skyrim NPC"
+  "entity.skycraft.skyrim_actor": "Skyrim NPC",
+  "block.skycraft.inverted_block": "Inverted Block"
 }

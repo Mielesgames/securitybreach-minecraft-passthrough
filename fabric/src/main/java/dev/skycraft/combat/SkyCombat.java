@@ -92,6 +92,15 @@ public final class SkyCombat {
 					Proto.EV_HIT_ACTOR, proxy.formId(), hit[0], hit[1], hit[2], hit[3], Float.floatToRawIntBits(hit[4]), Float.floatToRawIntBits(hit[5])
 				);
 				SkyCraft.LOG.info("SkyCraft: hit {} for {} (knockback {})", proxy.getName().getString(), hit[0], hit[3]);
+				// A jockey: the blow throws the chicken, and the character rides along.
+				var rider = JOCKEYS.get(proxy.formId());
+				var chicken = rider != null ? rider.getVehicle() : null;
+				if (chicken != null && hit[3] > 0.0F) {
+					float strength = Math.min(hit[3], 3.0F);
+					chicken.setDeltaMovement(chicken.getDeltaMovement().add(hit[1] * 0.5 * strength, 0.35 + 0.1 * strength, hit[2] * 0.5 * strength));
+					chicken.hurtMarked = true;
+					SkyCraft.LOG.info("SkyCraft: {}'s chicken is thrown too", proxy.getName().getString());
+				}
 			}
 		}
 	}
@@ -185,6 +194,49 @@ public final class SkyCombat {
 
 	private static final Map<Integer, net.minecraft.world.entity.monster.zombie.Zombie> JOCKEYS = new HashMap<>();
 	private static final java.util.Set<Integer> JOCKEY_ROLLED = new java.util.HashSet<>();
+	private static final java.util.Set<Integer> JOCKEY_FORCED = new java.util.HashSet<>();
+	private static String jockeyName;
+	private static long jockeyUntil;
+
+	/**
+	 * A command asked for a jockey: the nearest character of that name becomes one, or (summoning)
+	 * the one about to appear does.
+	 */
+	public static void forceJockey(String name, boolean newOne) {
+		String wanted = name.toLowerCase(java.util.Locale.ROOT);
+		if (newOne) {
+			jockeyName = wanted;
+			jockeyUntil = System.currentTimeMillis() + 5000;
+			return;
+		}
+		SkyrimActorEntity best = null;
+		for (var proxy : PROXIES.values()) {
+			if (!proxy.getName().getString().toLowerCase(java.util.Locale.ROOT).contains(wanted)) {
+				continue;
+			}
+			var player = proxy.level().getNearestPlayer(proxy, 256.0);
+			if (best == null || (player != null && proxy.distanceToSqr(player) < best.distanceToSqr(player))) {
+				best = proxy;
+			}
+		}
+		if (best != null) {
+			JOCKEY_FORCED.add(best.formId());
+		}
+	}
+
+	/** Shears on a character: what its stand-in wears comes off and drops. */
+	public static void shear(int formId) {
+		SkyrimActorEntity proxy = PROXIES.get(formId);
+		if (proxy == null) {
+			return;
+		}
+		var worn = proxy.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.CHEST);
+		if (!worn.isEmpty()) {
+			proxy.spawnAtLocation((ServerLevel) proxy.level(), worn.copy());
+			proxy.setItemSlot(net.minecraft.world.entity.EquipmentSlot.CHEST, net.minecraft.world.item.ItemStack.EMPTY);
+			SkyCraft.LOG.info("SkyCraft: {} was sheared", proxy.getName().getString());
+		}
+	}
 	private static final String JOCKEY_TAG = "skycraft_jockey";
 	/** One hostile character in ten is a chicken jockey. */
 	private static final float JOCKEY_CHANCE = 0.1F;
@@ -196,7 +248,15 @@ public final class SkyCombat {
 	 */
 	private static boolean jockey(ServerLevel level, SkyrimActorEntity proxy, SkyLink.Actor a) {
 		int id = a.formId();
-		if (JOCKEY_ROLLED.add(id) && a.hostile() && level.getRandom().nextFloat() < JOCKEY_CHANCE) {
+		boolean fresh = JOCKEY_ROLLED.add(id);
+		// "/summon chica jockey": the next new one of that name rides, whatever the dice say.
+		boolean named = fresh && jockeyName != null && System.currentTimeMillis() < jockeyUntil
+			&& a.name().toLowerCase(java.util.Locale.ROOT).contains(jockeyName);
+		if (named) {
+			jockeyName = null;
+		}
+		boolean forced = JOCKEY_FORCED.remove(id) || named;
+		if (!JOCKEYS.containsKey(id) && (forced || (fresh && a.hostile() && level.getRandom().nextFloat() < JOCKEY_CHANCE))) {
 			var chicken = net.minecraft.world.entity.EntityTypes.CHICKEN.create(level, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
 			var rider = net.minecraft.world.entity.EntityTypes.ZOMBIE.create(level, net.minecraft.world.entity.EntitySpawnReason.COMMAND);
 			if (chicken != null && rider != null) {
@@ -289,6 +349,18 @@ public final class SkyCombat {
 	private static void surroundings(ServerLevel level, SkyrimActorEntity proxy, SkyLink.Actor a) {
 		int id = a.formId();
 		long now = level.getGameTime();
+		// An elytra dropped at a character's feet goes on, as from a dispenser.
+		if (proxy.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.CHEST).isEmpty()) {
+			for (var drop : level.getEntitiesOfClass(net.minecraft.world.entity.item.ItemEntity.class, proxy.getBoundingBox().inflate(0.75),
+				d -> d.getItem().is(net.minecraft.world.item.Items.ELYTRA))) {
+				proxy.setItemSlot(net.minecraft.world.entity.EquipmentSlot.CHEST, drop.getItem().split(1));
+				if (drop.getItem().isEmpty()) {
+					drop.discard();
+				}
+				SkyCraft.LOG.info("SkyCraft: {} picked up an elytra", proxy.getName().getString());
+				break;
+			}
+		}
 		boolean wings = proxy.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.CHEST).is(net.minecraft.world.item.Items.ELYTRA);
 		Boolean had = WINGS.put(id, wings);
 		if ((had == null ? wings : had != wings) || (wings && now % 40 == 0)) {

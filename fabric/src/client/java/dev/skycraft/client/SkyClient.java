@@ -547,6 +547,12 @@ public final class SkyClient {
 			if (player.getVehicle() instanceof net.minecraft.world.entity.decoration.ArmorStand) {
 				flags |= Proto.MC_HIDING;
 			}
+			if (player.getMainHandItem().is(net.minecraft.world.item.Items.SHEARS)) {
+				flags |= Proto.MC_HOLDS_SHEARS;
+			}
+			if (player.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.HEAD).is(net.minecraft.world.item.Items.CARVED_PUMPKIN)) {
+				flags |= Proto.MC_PUMPKIN;
+			}
 			if (player.isBlocking()) {
 				flags |= Proto.MC_BLOCKING;
 			}

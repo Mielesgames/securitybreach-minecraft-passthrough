@@ -59,6 +59,23 @@ namespace world
             float depth[4];   // game depth texels per back buffer pixel (x, y); z: 1 = use the game's depth
         };
 
+        constexpr int kMaxLights = 32;
+        constexpr int kMaxPits = 64;
+
+        struct alignas(16) LightConstants
+        {
+            float right[4];
+            float up[4];
+            float forward[4];
+            float position[4];
+            float lens[4];
+            float screen[4];
+            float light_pos[kMaxLights][4];
+            float light_color[kMaxLights][4];
+            float pit_info[4];
+            float pits[kMaxPits][4];
+        };
+
         // Everything but the blocks, as Minecraft drew it this frame: mobs, items, particles.
         struct Batch
         {
@@ -90,11 +107,13 @@ VSOut VSMain(VSIn i) {
 }
 // Minecraft's fixed shading per face, by Direction ordinal + 1 (0: none).
 static const float kFaceShade[8] = { 1.0, 0.5, 1.0, 0.8, 0.8, 0.6, 0.6, 1.0 };
+bool InPit(float2 pixel, float d);
 float4 PSMain(VSOut i) : SV_Target {
     if (depthInfo.z > 0.5) {
         // The game's depth: near / distance, 0 where there is nothing (sky).
         float d = sceneDepth.Load(int3(i.pos.xy * depthInfo.xy, 0));
-        if (d > 0 && i.viewZ > (offset.w / d) * 1.002 + 1.5) discard;  // behind the game's geometry
+        // Behind the game's geometry: hidden, unless that geometry is dug away there.
+        if (d > 0 && i.viewZ > (offset.w / d) * 1.002 + 1.5 && !InPit(i.pos.xy, d)) discard;
     }
     float4 t = (i.flags & 4) ? float4(1, 1, 1, 1) : atlas.Sample(samp, i.uv);
     bool translucent = (i.flags & 2) != 0;
@@ -111,6 +130,92 @@ float4 VSFull(uint id : SV_VertexID) : SV_Position {
 float4 PSFull() : SV_Target {
     return float4(offset.xyz, 0);
 }
+// Minecraft's lights on the game's picture: where each pixel is comes from the game's depth,
+// and every light near it adds its colour (multiplied in by the blend: picture * (1 + light)).
+cbuffer Lights : register(b1) {
+    float4 camRight; float4 camUp; float4 camForward;
+    float4 camPos;      // w: near plane
+    float4 lens;        // x: tan(half fov) across, y: the same up, zw: game depth texels per pixel
+    float4 screen;      // xy: back buffer size, z: light count, w: time (seconds)
+    float4 lightPos[32];    // Unreal units; w: reach
+    float4 lightColor[32];  // rgb; w: kind (0 steady, 1 flame, 2 lava)
+    float4 pitInfo;         // x: pit count
+    float4 pits[64];        // Minecraft's inverted blocks near the camera: block coords (Minecraft axes)
+};
+// Where the game's surface under this pixel is, in Unreal units.
+float3 SurfaceAt(float2 pixel, float d) {
+    float along = camPos.w / d;
+    float2 ndc = float2(pixel.x / screen.x * 2 - 1, 1 - pixel.y / screen.y * 2);
+    return camPos.xyz + camForward.xyz * along + camRight.xyz * (ndc.x * along * lens.x) + camUp.xyz * (ndc.y * along * lens.y);
+}
+// The pit (index) a point in Minecraft coordinates is in, or -1.
+int PitAt(float3 m) {
+    int count = (int)pitInfo.x;
+    for (int k = 0; k < count; ++k) {
+        float3 low = pits[k].xyz;
+        if (all(m >= low) && all(m <= low + 1)) return k;
+    }
+    return -1;
+}
+// The game's surface at this pixel lies in a pit: what the game drew there is gone.
+bool InPit(float2 pixel, float d) {
+    if (pitInfo.x < 0.5) return false;
+    float3 u = SurfaceAt(pixel, d);
+    float3 cam = float3(camPos.x, camPos.z, camPos.y) / 70.0;
+    float3 m = float3(u.x, u.z, u.y) / 70.0;
+    // A hair further along the ray: the surface itself is on the pit's edge.
+    return PitAt(m + normalize(m - cam) * 0.01) >= 0;
+}
+// A pit: where the game's surface is dug away, the inside of the hole is drawn instead. The ray
+// goes through the pits it meets (a hole can be several blocks) and the face it leaves the last
+// one by is its wall or floor, darker the deeper it is.
+float4 PSPit(float4 pos : SV_Position) : SV_Target {
+    float d = sceneDepth.Load(int3(pos.xy * lens.zw, 0));
+    if (d <= 0 || !InPit(pos.xy, d)) discard;
+    float3 u = SurfaceAt(pos.xy, d);
+    float3 cam = float3(camPos.x, camPos.z, camPos.y) / 70.0;
+    float3 m = float3(u.x, u.z, u.y) / 70.0;
+    float3 dir = normalize(m - cam);
+    float3 inv = 1.0 / (abs(dir) < 1e-5 ? 1e-5 * sign(dir + 1e-6) : dir);
+    float3 p = m + dir * 0.01;
+    int axis = 1;
+    float depth = 0;
+    for (int step = 0; step < 8; ++step) {
+        int k = PitAt(p);
+        if (k < 0) break;
+        float3 low = pits[k].xyz;
+        float3 far = (dir > 0 ? low + 1 : low) - p;
+        float3 t = far * inv;
+        float exitT = min(t.x, min(t.y, t.z));
+        axis = t.x <= exitT ? 0 : (t.y <= exitT ? 1 : 2);
+        p += dir * (exitT + 0.002);
+        depth += exitT;
+    }
+    // Minecraft's face shading: floors light, walls darker; deeper is darker still.
+    float shade = axis == 1 ? (dir.y < 0 ? 0.55 : 0.35) : (axis == 0 ? 0.42 : 0.48);
+    float fade = exp(-depth * 0.35);
+    float3 c = float3(0.12, 0.09, 0.15) * shade * (0.35 + 0.65 * fade);
+    return float4(c, 1);
+}
+float4 PSLight(float4 pos : SV_Position) : SV_Target {
+    float d = sceneDepth.Load(int3(pos.xy * lens.zw, 0));
+    if (d <= 0) return float4(0, 0, 0, 0);  // sky
+    float along = camPos.w / d;
+    float2 ndc = float2(pos.x / screen.x * 2 - 1, 1 - pos.y / screen.y * 2);
+    float3 world = camPos.xyz + camForward.xyz * along + camRight.xyz * (ndc.x * along * lens.x) + camUp.xyz * (ndc.y * along * lens.y);
+    float3 sum = 0;
+    int count = (int)screen.z;
+    for (int k = 0; k < count; ++k) {
+        float3 to = lightPos[k].xyz - world;
+        float reach = lightPos[k].w;
+        float fall = saturate(1 - length(to) / reach);
+        float kind = lightColor[k].w;
+        // Flames flicker, lava breathes slowly.
+        float wave = kind > 1.5 ? 0.85 + 0.15 * sin(screen.w * 1.3 + k) : kind > 0.5 ? 0.9 + 0.1 * sin(screen.w * 11 + k * 7) * sin(screen.w * 5.3 + k) : 1;
+        sum += lightColor[k].rgb * fall * fall * wave;
+    }
+    return float4(sum * 2.5, 0);
+}
 )";
 
         // Which blocks of a section are solid, one bit each (x + 16z + 256y). Read by the game thread.
@@ -119,6 +224,23 @@ float4 PSFull() : SV_Target {
 
         // Burning blocks per section (same lock): packed x | y << 4 | z << 8 | hazard << 12.
         std::unordered_map<std::uint64_t, std::vector<std::uint16_t>> g_hazards;
+        // Light-giving blocks per section (same lock): Minecraft x, y, z of the
+        // block's middle; level (1-15); colour; kind (proto::LightKind).
+        struct LightBlock
+        {
+            float x, y, z;
+            float level;
+            float rgb[3];
+            float kind;
+        };
+
+        std::unordered_map<std::uint64_t, std::vector<LightBlock>> g_light_blocks;
+
+        // Inverted blocks per section (same lock): bit x + 16z + 256y. And the
+        // sections whose holes changed, for the collision to look again.
+        std::unordered_map<std::uint64_t, std::array<std::uint64_t, 64>> g_dug;
+        std::vector<std::array<int, 3>> g_dug_changed;
+
         // Boxes of the blocks that aren't full cubes, per section (same lock), in blocks.
         std::unordered_map<std::uint64_t, std::vector<std::array<float, 6>>> g_shapes;
 
@@ -155,6 +277,13 @@ float4 PSFull() : SV_Target {
         ID3D11BlendState* g_blend_multiply = nullptr;
         ID3D11BlendState* g_blend_add = nullptr;
         ID3D11DepthStencilState* g_depth_off = nullptr;
+        // The pass that lays Minecraft's lights over the game's picture.
+        ID3D11PixelShader* g_ps_light = nullptr;
+        ID3D11Buffer* g_light_constants = nullptr;
+        // The pits of inverted blocks; whether there are any this frame (the
+        // block pass then needs the same constants, to see through them).
+        ID3D11PixelShader* g_ps_pit = nullptr;
+        bool g_pits_now = false;
 
         std::vector<Batch> g_scene_batches;
         ID3D11Buffer* g_scene_vb = nullptr;
@@ -369,12 +498,46 @@ float4 PSFull() : SV_Target {
 
             ID3DBlob* full_vs_blob = nullptr;
             ID3DBlob* full_ps_blob = nullptr;
+            ID3DBlob* light_ps_blob = nullptr;
 
             if (compile("VSFull", "vs_5_0", &full_vs_blob) && compile("PSFull", "ps_5_0", &full_ps_blob))
             {
                 device->CreateVertexShader(full_vs_blob->GetBufferPointer(), full_vs_blob->GetBufferSize(), nullptr, &g_vs_full);
                 device->CreatePixelShader(full_ps_blob->GetBufferPointer(), full_ps_blob->GetBufferSize(), nullptr, &g_ps_full);
             }
+
+            ID3DBlob* pit_ps_blob = nullptr;
+
+            if (compile("PSPit", "ps_5_0", &pit_ps_blob))
+            {
+                device->CreatePixelShader(pit_ps_blob->GetBufferPointer(), pit_ps_blob->GetBufferSize(), nullptr, &g_ps_pit);
+            }
+
+            safe_release(pit_ps_blob);
+
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP world: pit shader {}\n"),
+                g_ps_pit != nullptr ? STR("ready") : STR("FAILED (holes are not drawn)")
+            );
+
+            if (compile("PSLight", "ps_5_0", &light_ps_blob))
+            {
+                device->CreatePixelShader(light_ps_blob->GetBufferPointer(), light_ps_blob->GetBufferSize(), nullptr, &g_ps_light);
+
+                D3D11_BUFFER_DESC lbd{};
+                lbd.ByteWidth = sizeof(LightConstants);
+                lbd.Usage = D3D11_USAGE_DYNAMIC;
+                lbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+                lbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+                device->CreateBuffer(&lbd, nullptr, &g_light_constants);
+            }
+
+            safe_release(light_ps_blob);
+
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP world: light shader {}\n"),
+                g_ps_light != nullptr && g_light_constants != nullptr ? STR("ready") : STR("FAILED (no Minecraft light on the game)")
+            );
 
             safe_release(full_vs_blob);
             safe_release(full_ps_blob);
@@ -875,6 +1038,7 @@ float4 PSFull() : SV_Target {
             const auto key = section_key(hdr->sx, hdr->sy, hdr->sz);
 
             std::vector<std::uint16_t> burning;
+            std::vector<LightBlock> glowing;
 
             if (bytes >= sizeof(proto::RenLights) + std::uint64_t(hdr->count) * sizeof(proto::RenLight))
             {
@@ -882,6 +1046,17 @@ float4 PSFull() : SV_Target {
 
                 for (std::uint32_t i = 0; i < hdr->count; ++i)
                 {
+                    const std::uint32_t color = lights[i].color;
+
+                    glowing.push_back({
+                        float(hdr->sx * 16 + (lights[i].x & 15)) + 0.5f,
+                        float(hdr->sy * 16 + (lights[i].y & 15)) + 0.5f,
+                        float(hdr->sz * 16 + (lights[i].z & 15)) + 0.5f,
+                        float(lights[i].level),
+                        { float(color & 0xFF) / 255.0f, float((color >> 8) & 0xFF) / 255.0f, float((color >> 16) & 0xFF) / 255.0f },
+                        float((color >> 24) & 0xF),
+                    });
+
                     // The colour's top byte: light kind in the low bits, hazard in the high ones.
                     const std::uint32_t hazard = (lights[i].color >> 28) & 0xF;
 
@@ -896,6 +1071,15 @@ float4 PSFull() : SV_Target {
 
             std::scoped_lock lock(g_solids_mutex);
 
+            if (glowing.empty())
+            {
+                g_light_blocks.erase(key);
+            }
+            else
+            {
+                g_light_blocks[key] = std::move(glowing);
+            }
+
             if (burning.empty())
             {
                 g_hazards.erase(key);
@@ -904,6 +1088,42 @@ float4 PSFull() : SV_Target {
             {
                 g_hazards[key] = std::move(burning);
             }
+        }
+
+        void on_dug(const std::uint8_t* data, std::uint64_t bytes)
+        {
+            if (bytes < sizeof(proto::RenDug))
+            {
+                return;
+            }
+
+            const auto* hdr = reinterpret_cast<const proto::RenDug*>(data);
+            const auto key = section_key(hdr->sx, hdr->sy, hdr->sz);
+
+            std::scoped_lock lock(g_solids_mutex);
+
+            if (hdr->count == 0 || bytes < sizeof(proto::RenDug) + 512)
+            {
+                if (g_dug.erase(key) == 0)
+                {
+                    return;
+                }
+            }
+            else
+            {
+                std::array<std::uint64_t, 64> bits{};
+
+                std::memcpy(bits.data(), data + sizeof(proto::RenDug), 512);
+
+                if (const auto it = g_dug.find(key); it != g_dug.end() && it->second == bits)
+                {
+                    return;
+                }
+
+                g_dug[key] = bits;
+            }
+
+            g_dug_changed.push_back({ hdr->sx, hdr->sy, hdr->sz });
         }
 
         void on_shapes(const std::uint8_t* data, std::uint64_t bytes)
@@ -1578,6 +1798,206 @@ float4 PSFull() : SV_Target {
 
     namespace
     {
+        // Torches, lava, glowstone... light the game's picture: the nearest
+        // ones (up to 32), each reaching as many blocks as its light level,
+        // brightening what the game drew there. No shadows: walls don't stop it.
+        void light_up(ID3D11DeviceContext* context, ID3D11RenderTargetView* target, UINT width, UINT height, const Camera& camera, bool lights)
+        {
+            g_pits_now = false;
+
+            if (
+                g_ps_light == nullptr || g_light_constants == nullptr || g_vs_full == nullptr ||
+                g_blend_multiply == nullptr || g_scene_depth_srv == nullptr || height == 0
+            )
+            {
+                return;
+            }
+
+            struct Near
+            {
+                float distance;
+                float pos[4];
+                float color[4];
+            };
+
+            std::vector<Near> nearby;
+
+            {
+                std::scoped_lock lock(g_solids_mutex);
+
+                for (const auto& [key, blocks] : g_light_blocks)
+                {
+                    for (const auto& b : blocks)
+                    {
+                        // Minecraft to Unreal axes.
+                        const float ux = b.x * proto::kUnitsPerBlock;
+                        const float uy = b.z * proto::kUnitsPerBlock;
+                        const float uz = b.y * proto::kUnitsPerBlock;
+                        const float dx = ux - float(camera.position[0]);
+                        const float dy = uy - float(camera.position[1]);
+                        const float dz = uz - float(camera.position[2]);
+                        const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+                        const float reach = b.level * proto::kUnitsPerBlock;
+
+                        if (distance > reach + 40.0f * proto::kUnitsPerBlock)
+                        {
+                            continue;
+                        }
+
+                        const float strength = b.level / 15.0f;
+
+                        nearby.push_back({ distance, { ux, uy, uz, reach }, { b.rgb[0] * strength, b.rgb[1] * strength, b.rgb[2] * strength, b.kind } });
+                    }
+                }
+            }
+
+            // The holes near the camera.
+            std::vector<std::pair<float, std::array<float, 3>>> holes;
+
+            {
+                const double cx = camera.position[0] / proto::kUnitsPerBlock;
+                const double cy = camera.position[2] / proto::kUnitsPerBlock;
+                const double cz = camera.position[1] / proto::kUnitsPerBlock;
+
+                std::scoped_lock lock(g_solids_mutex);
+
+                for (const auto& [key, bits] : g_dug)
+                {
+                    const auto unpack = [](std::uint64_t v) { return int(std::int32_t(std::uint32_t(v << 11)) >> 11); };
+                    const int sx = unpack(key >> 42), sy = unpack((key >> 21) & 0x1FFFFF), sz = unpack(key & 0x1FFFFF);
+
+                    for (int bit = 0; bit < 4096; ++bit)
+                    {
+                        if (((bits[bit >> 6] >> (bit & 63)) & 1) == 0)
+                        {
+                            continue;
+                        }
+
+                        const float bx = float(sx * 16 + (bit & 15));
+                        const float bz = float(sz * 16 + ((bit >> 4) & 15));
+                        const float by = float(sy * 16 + (bit >> 8));
+                        const float dx = bx + 0.5f - float(cx), dy = by + 0.5f - float(cy), dz = bz + 0.5f - float(cz);
+
+                        holes.push_back({ dx * dx + dy * dy + dz * dz, { bx, by, bz } });
+                    }
+                }
+            }
+
+            if (holes.size() > kMaxPits)
+            {
+                std::partial_sort(holes.begin(), holes.begin() + kMaxPits, holes.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+                holes.resize(kMaxPits);
+            }
+
+            g_pits_now = !holes.empty();
+
+            if (nearby.empty() && holes.empty())
+            {
+                return;
+            }
+
+            if (nearby.size() > kMaxLights)
+            {
+                std::partial_sort(nearby.begin(), nearby.begin() + kMaxLights, nearby.end(), [](const Near& a, const Near& b) { return a.distance < b.distance; });
+                nearby.resize(kMaxLights);
+            }
+
+            LightConstants constants{};
+            const float aspect = float(width) / float(height);
+
+            for (int i = 0; i < 3; ++i)
+            {
+                constants.right[i] = camera.right[i];
+                constants.up[i] = camera.up[i];
+                constants.forward[i] = camera.forward[i];
+                constants.position[i] = float(camera.position[i]);
+            }
+
+            constants.position[3] = kNearPlane;
+            constants.lens[0] = camera.tan_half_fov;
+            constants.lens[1] = camera.tan_half_fov / aspect;
+            constants.lens[2] = float(g_scene_depth_w) / float(width);
+            constants.lens[3] = float(g_scene_depth_h) / float(height);
+            constants.screen[0] = float(width);
+            constants.screen[1] = float(height);
+            constants.screen[2] = float(nearby.size());
+            constants.screen[3] = float(::GetTickCount64() % 1000000) / 1000.0f;
+
+            for (std::size_t i = 0; i < nearby.size(); ++i)
+            {
+                std::memcpy(constants.light_pos[i], nearby[i].pos, sizeof(nearby[i].pos));
+                std::memcpy(constants.light_color[i], nearby[i].color, sizeof(nearby[i].color));
+            }
+
+            constants.pit_info[0] = float(holes.size());
+
+            for (std::size_t i = 0; i < holes.size(); ++i)
+            {
+                constants.pits[i][0] = holes[i].second[0];
+                constants.pits[i][1] = holes[i].second[1];
+                constants.pits[i][2] = holes[i].second[2];
+            }
+
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+
+            if (FAILED(context->Map(g_light_constants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+            {
+                return;
+            }
+
+            std::memcpy(mapped.pData, &constants, sizeof(constants));
+            context->Unmap(g_light_constants, 0);
+
+            const D3D11_VIEWPORT vp{ 0, 0, float(width), float(height), 0, 1 };
+            const float factor[4]{};
+
+            context->OMSetRenderTargets(1, &target, nullptr);
+            context->OMSetDepthStencilState(g_depth_off, 0);
+            context->OMSetBlendState(g_blend_multiply, factor, 0xFFFFFFFF);
+            context->RSSetState(g_raster);
+            context->RSSetViewports(1, &vp);
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context->IASetInputLayout(nullptr);
+            context->VSSetShader(g_vs_full, nullptr, 0);
+            context->PSSetShader(g_ps_light, nullptr, 0);
+            context->PSSetConstantBuffers(1, 1, &g_light_constants);
+            context->PSSetShaderResources(1, 1, &g_scene_depth_srv);
+
+            // Once in a while: how much light and how many holes are drawn, to
+            // see after a crash whether these passes were running.
+            static ULONGLONG last_report = 0;
+
+            if (const ULONGLONG tick = ::GetTickCount64(); tick - last_report > 10000)
+            {
+                last_report = tick;
+
+                RC::Output::send<RC::LogLevel::Default>(
+                    STR("SBMP world: lighting the game with {} Minecraft lights, drawing {} holes\n"),
+                    lights ? nearby.size() : std::size_t{ 0 },
+                    holes.size()
+                );
+            }
+
+            // With night vision everything is lit already.
+            if (!nearby.empty() && lights)
+            {
+                context->Draw(3, 0);
+            }
+
+            // The holes, over whatever the game drew where they are.
+            if (!holes.empty() && g_ps_pit != nullptr)
+            {
+                context->OMSetBlendState(g_blend_off, factor, 0xFFFFFFFF);
+                context->PSSetShader(g_ps_pit, nullptr, 0);
+                context->Draw(3, 0);
+            }
+
+            // The game binds its depth buffer for writing again next frame.
+            ID3D11ShaderResourceView* none = nullptr;
+
+            context->PSSetShaderResources(1, 1, &none);
+        }
+
         // Night vision for the game's own picture. It is already finished and
         // tone-mapped, so this is a lift of what is there, not real light.
         void brighten(ID3D11DeviceContext* context, ID3D11RenderTargetView* target, UINT width, UINT height)
@@ -1713,6 +2133,17 @@ float4 PSFull() : SV_Target {
                     g_solids.clear();
                     g_hazards.clear();
                     g_shapes.clear();
+                    g_light_blocks.clear();
+
+                    for (const auto& [key, bits] : g_dug)
+                    {
+                        // Unpack the key back into section coordinates (21 bits each, signed).
+                        const auto unpack = [](std::uint64_t v) { return int(std::int32_t(std::uint32_t(v << 11)) >> 11); };
+
+                        g_dug_changed.push_back({ unpack(key >> 42), unpack((key >> 21) & 0x1FFFFF), unpack(key & 0x1FFFFF) });
+                    }
+
+                    g_dug.clear();
                 }
                 break;
 
@@ -1722,6 +2153,10 @@ float4 PSFull() : SV_Target {
 
             case proto::kRenShapes:
                 on_shapes(payload, msg.payloadBytes);
+                break;
+
+            case proto::kRenDug:
+                on_dug(payload, msg.payloadBytes);
                 break;
 
             case proto::kRenSolids:
@@ -1801,6 +2236,21 @@ float4 PSFull() : SV_Target {
             brighten(context, target, width, height);
         }
 
+        {
+            Camera lit;
+
+            {
+                std::scoped_lock lock(g_camera_mutex);
+
+                lit = g_camera;
+            }
+
+            if (lit.valid && lit.tan_half_fov > 0.0f)
+            {
+                light_up(context, target, width, height, lit, !night_vision);
+            }
+        }
+
         if (
             (
                 g_sections.empty() && g_scene_batches.empty() && g_avatar_batches.empty() &&
@@ -1864,6 +2314,23 @@ float4 PSFull() : SV_Target {
         context->PSSetShaderResources(1, 1, &g_scene_depth_srv);
         context->PSSetSamplers(0, 1, &g_sampler);
 
+        // The pits' constants (InPit): without pits this frame, a zero count.
+        if (g_light_constants != nullptr)
+        {
+            if (!g_pits_now)
+            {
+                D3D11_MAPPED_SUBRESOURCE mapped{};
+
+                if (SUCCEEDED(context->Map(g_light_constants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+                {
+                    std::memset(mapped.pData, 0, sizeof(LightConstants));
+                    context->Unmap(g_light_constants, 0);
+                }
+            }
+
+            context->PSSetConstantBuffers(1, 1, &g_light_constants);
+        }
+
         context->OMSetBlendState(g_blend_off, factor, 0xFFFFFFFF);
         context->OMSetDepthStencilState(g_depth_write, 0);
         draw_pass(context, camera, frame, false);
@@ -1883,6 +2350,37 @@ float4 PSFull() : SV_Target {
         // The game binds its depth buffer for writing again next frame.
         ID3D11ShaderResourceView* none = nullptr;
         context->PSSetShaderResources(1, 1, &none);
+    }
+
+    bool dug_at(int x, int y, int z)
+    {
+        std::scoped_lock lock(g_solids_mutex);
+
+        const auto it = g_dug.find(section_key(x >> 4, y >> 4, z >> 4));
+
+        if (it == g_dug.end())
+        {
+            return false;
+        }
+
+        const int bit = (x & 15) + 16 * (z & 15) + 256 * (y & 15);
+
+        return (it->second[bit >> 6] >> (bit & 63)) & 1;
+    }
+
+    bool any_dug()
+    {
+        std::scoped_lock lock(g_solids_mutex);
+
+        return !g_dug.empty();
+    }
+
+    void take_dug_changes(std::vector<std::array<int, 3>>& out)
+    {
+        std::scoped_lock lock(g_solids_mutex);
+
+        out.insert(out.end(), g_dug_changed.begin(), g_dug_changed.end());
+        g_dug_changed.clear();
     }
 
     bool solid_at(int x, int y, int z)

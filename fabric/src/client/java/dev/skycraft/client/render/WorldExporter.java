@@ -197,6 +197,10 @@ public final class WorldExporter {
 		LevelChunkSection section = sectionAt(level, chunk, sy);
 		boolean empty = section == null || section.hasOnlyAir();
 		long[] dug = dev.skycraft.client.SkyDigClient.dugBits(chunk, sy);
+		// A copy: inverted blocks are added to it below, and the chunk's own record must not change.
+		if (dug != null) {
+			dug = dug.clone();
+		}
 		int dugCount = 0;
 		if (dug != null) {
 			for (long word : dug) {
@@ -223,6 +227,15 @@ public final class WorldExporter {
 						pos.set(origin.getX() + x, origin.getY() + y, origin.getZ() + z);
 						BlockState state = chunk.getBlockState(pos);
 						if (state.isAir()) {
+							continue;
+						}
+						// A hole in the host's world: sent as dug, like Skyrim's dug cells.
+						if (state.is(dev.skycraft.SkyCraft.INVERTED_BLOCK)) {
+							if (dug == null) {
+								dug = new long[64];
+							}
+							int bit = x + 16 * z + 256 * y;
+							dug[bit >> 6] |= 1L << (bit & 63);
 							continue;
 						}
 						// Blocks Skyrim's NPCs can't walk through (anything with a collision shape).
@@ -266,9 +279,16 @@ public final class WorldExporter {
 				}
 			}
 		}
+		if (dug != null) {
+			dugCount = 0;
+			for (long word : dug) {
+				dugCount += Long.bitCount(word);
+			}
+		}
 		// Holes dug into Skyrim's ground: Minecraft walls where its surface still runs above them.
+		// (Security Breach draws its own pit instead.)
 		var digLookup = dev.skycraft.world.SkyDig.clientDug;
-		if (dugCount > 0 && digLookup != null) {
+		if (dugCount > 0 && digLookup != null && !dev.skycraft.world.SkyDig.PASSTHROUGH) {
 			Minecraft minecraft = Minecraft.getInstance();
 			DigWalls.add(level, sx, sy, sz, dug, digLookup, st -> cubeFaces(minecraft, st), MESH::wall);
 		}

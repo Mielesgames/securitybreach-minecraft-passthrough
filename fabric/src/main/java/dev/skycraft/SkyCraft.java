@@ -26,6 +26,19 @@ public final class SkyCraft implements ModInitializer {
 			.category(net.minecraft.world.level.gamerules.GameRuleCategory.PLAYER)
 			.buildAndRegister(net.minecraft.resources.Identifier.fromNamespaceAndPath("skycraft", "allow_opening_doors"));
 
+	/** Security Breach: a hole in the host's world (see InvertedBlock). */
+	public static final net.minecraft.resources.ResourceKey<net.minecraft.world.level.block.Block> INVERTED_BLOCK_KEY = net.minecraft.resources.ResourceKey.create(
+		net.minecraft.core.registries.Registries.BLOCK, net.minecraft.resources.Identifier.fromNamespaceAndPath("skycraft", "inverted_block"));
+	public static final net.minecraft.world.level.block.Block INVERTED_BLOCK = net.minecraft.core.Registry.register(
+		net.minecraft.core.registries.BuiltInRegistries.BLOCK, INVERTED_BLOCK_KEY,
+		new dev.skycraft.world.InvertedBlock(net.minecraft.world.level.block.state.BlockBehaviour.Properties.of()
+			.setId(INVERTED_BLOCK_KEY).noCollision().noOcclusion().strength(0.3F)));
+	public static final net.minecraft.resources.ResourceKey<net.minecraft.world.item.Item> INVERTED_ITEM_KEY = net.minecraft.resources.ResourceKey.create(
+		net.minecraft.core.registries.Registries.ITEM, net.minecraft.resources.Identifier.fromNamespaceAndPath("skycraft", "inverted_block"));
+	public static final net.minecraft.world.item.Item INVERTED_ITEM = net.minecraft.core.Registry.register(
+		net.minecraft.core.registries.BuiltInRegistries.ITEM, INVERTED_ITEM_KEY,
+		new net.minecraft.world.item.BlockItem(INVERTED_BLOCK, new net.minecraft.world.item.Item.Properties().setId(INVERTED_ITEM_KEY).useBlockDescriptionPrefix()));
+
 	/** Security Breach: a water bucket scoops up an animatronic, like a fish. */
 	public static final net.minecraft.world.level.gamerules.GameRule<Boolean> ALLOW_ANIMATRONIC_WATER_BUCKET =
 		net.fabricmc.fabric.api.gamerule.v1.GameRuleBuilder.forBoolean(true)
@@ -71,6 +84,13 @@ public final class SkyCraft implements ModInitializer {
 		return data == null ? 0 : data.copyTag().getIntOr(TOKEN_KEY, 0);
 	}
 
+	private static int hostCommand(net.minecraft.commands.CommandSourceStack source, String name, boolean spawn, boolean jockey) {
+		if (jockey) {
+			dev.skycraft.combat.SkyCombat.forceJockey(name, spawn);
+		}
+		return hostCommand(source, name, spawn);
+	}
+
 	private static int hostCommand(net.minecraft.commands.CommandSourceStack source, String name, boolean spawn) {
 		if (!dev.skycraft.link.SkyLink.active()) {
 			source.sendFailure(net.minecraft.network.chat.Component.literal("Not linked to the game."));
@@ -85,6 +105,9 @@ public final class SkyCraft implements ModInitializer {
 	@Override
 	public void onInitialize() {
 		SkyCombat.init();
+		net.fabricmc.fabric.api.creativetab.v1.CreativeModeTabEvents.modifyOutputEvent(net.minecraft.world.item.CreativeModeTabs.FUNCTIONAL_BLOCKS)
+			.register(output -> output.accept(INVERTED_ITEM));
+		LOG.info("SkyCraft: inverted block registered as {}", INVERTED_BLOCK_KEY.identifier());
 		dev.skycraft.net.SkyNet.init();
 		dev.skycraft.world.SkyDig.init();
 		// Commands for the host game (Security Breach): "/freddy" or "/tp freddy" brings that
@@ -92,12 +115,16 @@ public final class SkyCraft implements ModInitializer {
 		// extra branches of Minecraft's own /tp and /summon, so the chat completes them.
 		net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
 			for (String name : dev.skycraft.link.Proto.HOST_CHARACTERS) {
-				dispatcher.register(net.minecraft.commands.Commands.literal(name).executes(context -> hostCommand(context.getSource(), name, false)));
+				// "... jockey": it rides a chicken.
+				dispatcher.register(net.minecraft.commands.Commands.literal(name).executes(context -> hostCommand(context.getSource(), name, false))
+					.then(net.minecraft.commands.Commands.literal("jockey").executes(context -> hostCommand(context.getSource(), name, false, true))));
 				// "tp" only forwards to "teleport": a branch added there is found by both.
 				dispatcher.register(net.minecraft.commands.Commands.literal("teleport")
-					.then(net.minecraft.commands.Commands.literal(name).executes(context -> hostCommand(context.getSource(), name, false))));
+					.then(net.minecraft.commands.Commands.literal(name).executes(context -> hostCommand(context.getSource(), name, false))
+						.then(net.minecraft.commands.Commands.literal("jockey").executes(context -> hostCommand(context.getSource(), name, false, true)))));
 				dispatcher.register(net.minecraft.commands.Commands.literal("summon")
-					.then(net.minecraft.commands.Commands.literal(name).executes(context -> hostCommand(context.getSource(), name, true))));
+					.then(net.minecraft.commands.Commands.literal(name).executes(context -> hostCommand(context.getSource(), name, true))
+						.then(net.minecraft.commands.Commands.literal("jockey").executes(context -> hostCommand(context.getSource(), name, true, true)))));
 			}
 		});
 		ServerLifecycleEvents.SERVER_STARTED.register(SkyCraft::configureServer);
@@ -227,6 +254,7 @@ public final class SkyCraft implements ModInitializer {
 		inventory.add(new ItemStack(Items.OAK_SAPLING, 8));
 		inventory.add(new ItemStack(Items.DIRT, 32));
 		inventory.add(new ItemStack(Items.BONE_MEAL, 16));
+		inventory.add(new ItemStack(INVERTED_ITEM, 16));
 		player.addTag(KIT3_TAG);
 		LOG.info("SkyCraft: gave Pizzaplex kit to {}", player.getName().getString());
 	}
