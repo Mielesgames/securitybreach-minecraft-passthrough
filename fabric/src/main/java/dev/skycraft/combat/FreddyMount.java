@@ -51,7 +51,7 @@ public final class FreddyMount {
 				return;
 			}
 			mule = fresh;
-			SkyCraft.LOG.info("SkyCraft: Freddy's mule created");
+			SkyCraft.LOG.info("FNAFSBCraft: Freddy's mule created");
 		} else {
 			mule.snapTo(x, y, z, player.getYRot(), 0.0F);
 		}

@@ -127,7 +127,7 @@ public final class WorldExporter {
 		sentGeneration = SkyLink.generation();
 		sentLevel = level;
 		atlas = SkyAtlas.build(minecraft);
-		SkyCraft.LOG.info("SkyCraft: {} animated textures (water, lava, fire, ...) will play in Skyrim", atlas.animatedSprites());
+		SkyCraft.LOG.info("FNAFSBCraft: {} animated textures (water, lava, fire, ...) will play in Skyrim", atlas.animatedSprites());
 		AvatarExporter.reset();
 		ICONS.clear();
 		CUBE_FACES.clear();
@@ -137,7 +137,7 @@ public final class WorldExporter {
 		SkyLink.writeRender(Proto.REN_CLEAR_ALL, ByteBuffer.allocate(0), null);
 		ByteBuffer header = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).putInt(atlas.width).putInt(atlas.height).flip();
 		boolean ok = SkyLink.writeRender(Proto.REN_ATLAS, header, atlas.pixels.duplicate().clear());
-		SkyCraft.LOG.info("SkyCraft: sent {}x{} texture atlas to Skyrim ({})", atlas.width, atlas.height, ok ? "ok" : "FAILED");
+		SkyCraft.LOG.info("FNAFSBCraft: sent {}x{} texture atlas to Skyrim ({})", atlas.width, atlas.height, ok ? "ok" : "FAILED");
 		SENT.clear();
 		LIT.clear();
 		SOLID.clear();
@@ -359,7 +359,7 @@ public final class WorldExporter {
 				}
 			}
 			if (++meshesSent <= 10 || meshesSent % 200 == 0) {
-				SkyCraft.LOG.info("SkyCraft: block mesh for section {} {} {}: {} vertices ({} sections in Skyrim)", sx, sy, sz, MESH.vertexCount(), SENT.size());
+				SkyCraft.LOG.info("FNAFSBCraft: block mesh for section {} {} {}: {} vertices ({} sections in Skyrim)", sx, sy, sz, MESH.vertexCount(), SENT.size());
 			}
 		} else {
 			markDirty(sx, sy, sz); // ring full; try again later

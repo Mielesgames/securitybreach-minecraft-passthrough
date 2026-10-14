@@ -211,7 +211,7 @@ public final class SkyCollision {
 			} catch (InterruptedException e) {
 				return;
 			} catch (Throwable t) {
-				SkyCraft.LOG.error("SkyCraft: collision consumer error", t);
+				SkyCraft.LOG.error("FNAFSBCraft: collision consumer error", t);
 				try {
 					Thread.sleep(500);
 				} catch (InterruptedException e) {
@@ -246,7 +246,7 @@ public final class SkyCollision {
 				case COL_CLEAR -> clear(s.get(JAVA_INT, payload));
 				case COL_REGION -> readRegion(s, payload);
 				case COL_TRIS -> readTris(s, payload);
-				default -> SkyCraft.LOG.warn("SkyCraft: unknown collision message {}", type);
+				default -> SkyCraft.LOG.warn("FNAFSBCraft: unknown collision message {}", type);
 			}
 			tail += align8(8 + payloadBytes);
 		}
@@ -262,7 +262,7 @@ public final class SkyCollision {
 	private static void adoptEpochIfFresh(int msgEpoch) {
 		if (epoch == -1) {
 			epoch = msgEpoch;
-			SkyCraft.LOG.info("SkyCraft: joined collision epoch {} already in progress", msgEpoch);
+			SkyCraft.LOG.info("FNAFSBCraft: joined collision epoch {} already in progress", msgEpoch);
 		}
 	}
 
@@ -274,7 +274,7 @@ public final class SkyCollision {
 		TRI_HASH.clear();
 		KNOWN_REGIONS.clear();
 		epoch = newEpoch;
-		SkyCraft.LOG.info("SkyCraft: collision cleared (epoch {})", newEpoch);
+		SkyCraft.LOG.info("FNAFSBCraft: collision cleared (epoch {})", newEpoch);
 	}
 
 	private static void readRegion(MemorySegment s, long p) {

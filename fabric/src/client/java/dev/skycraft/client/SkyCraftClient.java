@@ -43,7 +43,7 @@ public final class SkyCraftClient implements ClientModInitializer {
 					server.setUsesAuthentication(false);
 				}
 				boolean ok = server.publishServer(net.minecraft.server.MinecraftServer.MultiplayerScope.LAN, false, Integer.parseInt(port.trim()));
-				dev.skycraft.SkyCraft.LOG.info("SkyCraft: world opened to LAN on port {} ({}{})", port.trim(), ok ? "ok" : "FAILED",
+				dev.skycraft.SkyCraft.LOG.info("FNAFSBCraft: world opened to LAN on port {} ({}{})", port.trim(), ok ? "ok" : "FAILED",
 					System.getenv("SKYCRAFT_LAN_OFFLINE") != null ? ", offline logins allowed" : "");
 			});
 		});

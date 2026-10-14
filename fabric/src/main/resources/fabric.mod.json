@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "id": "skycraft",
   "version": "${version}",
-  "name": "SkyCraft",
-  "description": "Play Skyrim with Minecraft physics, inventory and viewmodels.",
+  "name": "FNAFSBCraft",
+  "description": "Play FNAF: Security Breach as Steve, with Minecraft physics, blocks, mobs and inventory.",
   "authors": ["chasmlol"],
   "contact": {
     "sources": "https://github.com/chasmlol/SkyCraft"

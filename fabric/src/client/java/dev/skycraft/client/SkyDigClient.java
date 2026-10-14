@@ -71,13 +71,22 @@ public final class SkyDigClient {
 			return false; // (a guest asks anyway: the host's setting decides)
 		}
 		SkyRay.Hit hit = result.hit;
-		if (hit.tri() == null || !hit.tri().diggable) {
+		boolean passthrough = SkyDig.PASSTHROUGH;
+		if (passthrough) {
+			// Security Breach: any of its surfaces can be mined, but only with a digging tool (a
+			// sword or a fist is for hitting what stands there, not the building).
+			var tool = minecraft.player.getMainHandItem();
+			if (hit.tri() == null || !(tool.is(net.minecraft.tags.ItemTags.PICKAXES) || tool.is(net.minecraft.tags.ItemTags.SHOVELS))) {
+				return false;
+			}
+		} else if (hit.tri() == null || !hit.tri().diggable) {
 			return false; // a building, or something else that stays
 		}
 		int[] cell = SkyRay.surfaceCell(hit);
 		BlockPos pos = new BlockPos(cell[0], cell[1], cell[2]);
 		BlockState here = minecraft.level.getBlockState(pos);
-		if (!here.isAir() && !here.canBeReplaced()) {
+		// (Security Breach: the barriers a dug hole leaves under the floor beside it can be dug too.)
+		if (!here.isAir() && !here.canBeReplaced() && !(passthrough && here.is(net.minecraft.world.level.block.Blocks.BARRIER))) {
 			return false;
 		}
 		if (SkyDig.isDug(minecraft.level, world(), pos)) {
@@ -94,7 +103,8 @@ public final class SkyDigClient {
 		}
 		miningTick = ticks;
 		int material = hit.tri().material == 0 ? DIG_STONE : hit.tri().material;
-		BlockState state = SkyDig.materialState(material);
+		// Security Breach's building is mined as hard as deepslate: a few seconds' work a cell.
+		BlockState state = passthrough ? net.minecraft.world.level.block.Blocks.DEEPSLATE.defaultBlockState() : SkyDig.materialState(material);
 		progress += minecraft.player.getAbilities().instabuild ? 1.0F : state.getDestroyProgress(minecraft.player, minecraft.level, pos);
 		if (hits++ % 4 == 0) {
 			var sound = state.getSoundType();
@@ -106,7 +116,9 @@ public final class SkyDigClient {
 		}
 		if (progress >= 1.0F) {
 			ClientPlayNetworking.send(new SkyNet.DigOpen(world(), pos, material));
-			REVEAL.put(pos.asLong(), REVEAL_TRIES); // what's around it: blocks, or walls
+			if (!passthrough) {
+				REVEAL.put(pos.asLong(), REVEAL_TRIES); // what's around it: blocks, or walls
+			}
 			mining = null;
 			progress = 0.0F;
 		}

@@ -107,6 +107,8 @@ namespace skycraft::proto
 		kMcHoldsSword = 1u << 11,  // a sword in the main hand: in creative it breaks nothing
 		kMcHoldsFlipTag = 1u << 12,  // a name tag named Dinnerbone or Grumm in the main hand
 		kMcDoorsLocked = 1u << 13,   // gamerule skycraft:allow_opening_doors is off
+		kMcHoldsPumpkin = 1u << 22,  // something a host character can be given to wear in the main hand (a carved pumpkin,
+		                             // ice, frost walker boots): right-click puts it on
 		kMcPumpkin = 1u << 21,       // a carved pumpkin on the head: host characters see the player less far
 		kMcHoldsShears = 1u << 20,   // shears in the main hand: right-click takes a host character's elytra off
 		kMcBlocking = 1u << 19,      // a shield is up: host characters in front bounce off it and can't grab the player
@@ -198,6 +200,12 @@ namespace skycraft::proto
 		kInSwing = 9,        // swing the main hand (the player used something in the host game)
 		kInTokenName = 11,   // part of a broken object's name: code = token id, a, b, c = 12 characters (latin-1, 0 = end)
 		kInDropToken = 12,   // drop the paper for a broken object: code = token id, a, b, c = where (Minecraft x 100)
+		kInWearPumpkin = 24,     // what the player holds goes on host character a (its ActorTable id): a pumpkin on its
+		                         // head, ice or frost walker boots on its feet
+		kInAchievementDone = 23, // achievement `code` is complete: a = 1 if the player has it, b = 1 if hidden, c = how many
+		                         // there are. Sent for each once, then again when one is unlocked
+		kInAchievementText = 22, // twelve more characters (a, b, c, latin-1) of achievement code / 4: field code % 4
+		                         // (0 its id, 1 title, 2 description)
 		kInShear = 21,       // shears on host character a (its ActorTable id): its stand-in drops what it wears
 		kInLeash = 20,       // code 1: put Minecraft's lead on the host character a (its ActorTable id), held by the
 		                     // player; code 0: take it off
@@ -281,11 +289,17 @@ namespace skycraft::proto
 		                    // flags = flight pitch (float bits), weapon = arrow texture (0 plain, 1 tipped, 2 spectral)
 		kEvSkillUse = 5,    // the player used a Skyrim skill in Minecraft: formId = Skyrim skill (ActorValue: 9 Block,
 		                    // 10 Smithing, 11 Heavy Armor, 12 Light Armor), a = uses (as Skyrim's AdvanceSkill counts them)
+		kEvActorBlind = 14, // what a host character wears does to it: flags 1 = blind (a carved pumpkin), 2 = slips (ice
+		                    // or frost walker boots on its feet), 0 = nothing. Repeated
+		                    // every 2 s while it does
+		kEvPreview = 13,    // Freddy's mule screen is open: a/b = the preview box's top left, c/d its size, in GUI
+		                    // pixels (the host shows Freddy there). Every tick while open
 		kEvLeash = 12,      // a host character is on a lead: formId, a/b/c = where the other end is (the player's
 		                    // hand or a fence knot). Every tick while it is; flags 0: the lead is off
 		kEvActorWings = 11, // a dispenser put an elytra on a host character's stand-in (flags 1) or it came off (0)
 		kEvActorPush = 10,  // Minecraft moves a host character: formId, a/b/c = blocks this tick (water, bubble
-		                    // column, towards a villager). flags 1: thrown up instead (slime), 2: it walks there itself
+		                    // column, towards a villager). flags 1: thrown up instead (slime), 2: it walks there itself,
+		                    // 4: it stands on honey (slowed)
 		kEvLeadPost = 9,    // the player used a fence at a, b, c (its middle): leads in hand are tied to it,
 		                    // or, with none in hand, the ones tied there come off
 		kEvActorAt = 8,     // a host character's stand-in sits in a boat or minecart: formId, a/b/c = where (its feet),

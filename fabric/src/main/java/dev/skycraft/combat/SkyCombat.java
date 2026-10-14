@@ -91,15 +91,16 @@ public final class SkyCombat {
 				SkyLink.pushEvent(
 					Proto.EV_HIT_ACTOR, proxy.formId(), hit[0], hit[1], hit[2], hit[3], Float.floatToRawIntBits(hit[4]), Float.floatToRawIntBits(hit[5])
 				);
-				SkyCraft.LOG.info("SkyCraft: hit {} for {} (knockback {})", proxy.getName().getString(), hit[0], hit[3]);
+				SkyCraft.LOG.info("FNAFSBCraft: hit {} for {} (knockback {})", proxy.getName().getString(), hit[0], hit[3]);
 				// A jockey: the blow throws the chicken, and the character rides along.
 				var rider = JOCKEYS.get(proxy.formId());
 				var chicken = rider != null ? rider.getVehicle() : null;
 				if (chicken != null && hit[3] > 0.0F) {
 					float strength = Math.min(hit[3], 3.0F);
 					chicken.setDeltaMovement(chicken.getDeltaMovement().add(hit[1] * 0.5 * strength, 0.35 + 0.1 * strength, hit[2] * 0.5 * strength));
-					chicken.hurtMarked = true;
-					SkyCraft.LOG.info("SkyCraft: {}'s chicken is thrown too", proxy.getName().getString());
+					// Tell the clients it moved, like a hit does.
+					chicken.needsSync = true;
+					SkyCraft.LOG.info("FNAFSBCraft: {}'s chicken is thrown too", proxy.getName().getString());
 				}
 			}
 		}
@@ -167,7 +168,7 @@ public final class SkyCombat {
 			player.getMainHandItem().shrink(1);
 		}
 		LEAD_HOLDERS.put(formId, holder);
-		SkyCraft.LOG.info("SkyCraft: {} is on a lead", proxy.getName().getString());
+		SkyCraft.LOG.info("FNAFSBCraft: {} is on a lead", proxy.getName().getString());
 	}
 
 	/** Keeps the lead's allay on the stand-in and tells the host where the lead's other end is. */
@@ -182,7 +183,7 @@ public final class SkyCombat {
 			LEAD_HOLDERS.remove(formId);
 			holder.discard();
 			SkyLink.pushEvent(Proto.EV_LEASH, formId, 0, 0, 0, 0, 0);
-			SkyCraft.LOG.info("SkyCraft: {} is off the lead", proxy.getName().getString());
+			SkyCraft.LOG.info("FNAFSBCraft: {} is off the lead", proxy.getName().getString());
 			return;
 		}
 		holder.snapTo(proxy.getX(), proxy.getY() + proxy.getBbHeight() * 0.5, proxy.getZ(), proxy.getYRot(), 0.0F);
@@ -224,17 +225,57 @@ public final class SkyCombat {
 		}
 	}
 
+	/**
+	 * Where a host character wears this, or null if it doesn't: a carved pumpkin on its head (it can't
+	 * see), ice or frost walker boots on its feet (it slips).
+	 */
+	public static net.minecraft.world.entity.@org.jspecify.annotations.Nullable EquipmentSlot wearable(net.minecraft.world.item.ItemStack stack) {
+		if (stack.is(net.minecraft.world.item.Items.CARVED_PUMPKIN)) {
+			return net.minecraft.world.entity.EquipmentSlot.HEAD;
+		}
+		return slippery(stack) ? net.minecraft.world.entity.EquipmentSlot.FEET : null;
+	}
+
+	private static boolean slippery(net.minecraft.world.item.ItemStack stack) {
+		if (stack.is(net.minecraft.world.item.Items.ICE) || stack.is(net.minecraft.world.item.Items.PACKED_ICE) || stack.is(net.minecraft.world.item.Items.BLUE_ICE)) {
+			return true;
+		}
+		return stack.is(net.minecraft.tags.ItemTags.FOOT_ARMOR)
+			&& stack.getEnchantments().keySet().stream().anyMatch(e -> e.is(net.minecraft.world.item.enchantment.Enchantments.FROST_WALKER));
+	}
+
+	/** What the player holds goes on a character (see wearable). */
+	public static void wearPumpkin(net.minecraft.server.level.ServerPlayer player, int formId) {
+		SkyrimActorEntity proxy = PROXIES.get(formId);
+		var held = player.getMainHandItem();
+		var slot = wearable(held);
+		if (proxy == null || slot == null || !proxy.getItemBySlot(slot).isEmpty()) {
+			return;
+		}
+		proxy.setItemSlot(slot, held.copyWithCount(1));
+		if (!player.getAbilities().instabuild) {
+			held.shrink(1);
+		}
+		SkyCraft.LOG.info("FNAFSBCraft: {} wears {} now", proxy.getName().getString(), proxy.getItemBySlot(slot).getHoverName().getString());
+	}
+
 	/** Shears on a character: what its stand-in wears comes off and drops. */
-	public static void shear(int formId) {
+	public static void shear(net.minecraft.server.level.ServerPlayer player, int formId) {
 		SkyrimActorEntity proxy = PROXIES.get(formId);
 		if (proxy == null) {
 			return;
 		}
-		var worn = proxy.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.CHEST);
-		if (!worn.isEmpty()) {
-			proxy.spawnAtLocation((ServerLevel) proxy.level(), worn.copy());
-			proxy.setItemSlot(net.minecraft.world.entity.EquipmentSlot.CHEST, net.minecraft.world.item.ItemStack.EMPTY);
-			SkyCraft.LOG.info("SkyCraft: {} was sheared", proxy.getName().getString());
+		for (var slot : new net.minecraft.world.entity.EquipmentSlot[] { net.minecraft.world.entity.EquipmentSlot.HEAD, net.minecraft.world.entity.EquipmentSlot.FEET, net.minecraft.world.entity.EquipmentSlot.CHEST }) {
+			var worn = proxy.getItemBySlot(slot);
+			if (!worn.isEmpty()) {
+				// Into the hand that cut it: dropped at the character's feet it would put it on again.
+				if (player == null || !player.getInventory().add(worn.copy())) {
+					proxy.spawnAtLocation((ServerLevel) proxy.level(), worn.copy());
+				}
+				proxy.setItemSlot(slot, net.minecraft.world.item.ItemStack.EMPTY);
+				SkyCraft.LOG.info("FNAFSBCraft: {} was sheared ({})", proxy.getName().getString(), slot.getName());
+				return; // one thing a cut: the pumpkin first, then the wings
+			}
 		}
 	}
 	private static final String JOCKEY_TAG = "skycraft_jockey";
@@ -273,7 +314,7 @@ public final class SkyCombat {
 					net.minecraft.world.effect.MobEffects.INVISIBILITY, net.minecraft.world.effect.MobEffectInstance.INFINITE_DURATION, 0, false, false));
 				if (level.addFreshEntity(chicken) && level.addFreshEntity(rider) && rider.startRiding(chicken, true, false)) {
 					JOCKEYS.put(id, rider);
-					SkyCraft.LOG.info("SkyCraft: {} is a chicken jockey", proxy.getName().getString());
+					SkyCraft.LOG.info("FNAFSBCraft: {} is a chicken jockey", proxy.getName().getString());
 				} else {
 					chicken.discard();
 					rider.discard();
@@ -291,7 +332,7 @@ public final class SkyCombat {
 			if (!rider.isRemoved()) {
 				rider.discard();
 			}
-			SkyCraft.LOG.info("SkyCraft: {} lost its chicken", proxy.getName().getString());
+			SkyCraft.LOG.info("FNAFSBCraft: {} lost its chicken", proxy.getName().getString());
 			return false;
 		}
 		// Sitting on the chicken's back.
@@ -301,6 +342,7 @@ public final class SkyCombat {
 
 	private static final Map<Integer, Long> NEXT_BOUNCE = new HashMap<>();
 	private static final Map<Integer, Boolean> WINGS = new HashMap<>();
+	private static final Map<Integer, Integer> BLIND = new HashMap<>();
 	private static final Map<Integer, net.minecraft.world.entity.animal.allay.Allay> GUIDES = new HashMap<>();
 	private static final String GUIDE_TAG = "skycraft_freddy_allay";
 
@@ -331,7 +373,7 @@ public final class SkyCombat {
 				return;
 			}
 			GUIDES.put(id, allay);
-			SkyCraft.LOG.info("SkyCraft: {} follows an allay now", proxy.getName().getString());
+			SkyCraft.LOG.info("FNAFSBCraft: {} follows an allay now", proxy.getName().getString());
 		}
 		var player = level.getNearestPlayer(allay, 64.0);
 		if (player != null) {
@@ -357,16 +399,35 @@ public final class SkyCombat {
 				if (drop.getItem().isEmpty()) {
 					drop.discard();
 				}
-				SkyCraft.LOG.info("SkyCraft: {} picked up an elytra", proxy.getName().getString());
+				SkyCraft.LOG.info("FNAFSBCraft: {} picked up an elytra", proxy.getName().getString());
 				break;
 			}
+		}
+		// A pumpkin, ice or frost walker boots dropped at its feet: on they go.
+		for (var drop : level.getEntitiesOfClass(net.minecraft.world.entity.item.ItemEntity.class, proxy.getBoundingBox().inflate(0.75),
+			d -> wearable(d.getItem()) != null)) {
+			var slot = wearable(drop.getItem());
+			if (!proxy.getItemBySlot(slot).isEmpty()) {
+				continue;
+			}
+			proxy.setItemSlot(slot, drop.getItem().split(1));
+			if (drop.getItem().isEmpty()) {
+				drop.discard();
+			}
+			SkyCraft.LOG.info("FNAFSBCraft: {} put on {}", proxy.getName().getString(), proxy.getItemBySlot(slot).getHoverName().getString());
+		}
+		int effects = (proxy.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.HEAD).is(net.minecraft.world.item.Items.CARVED_PUMPKIN) ? 1 : 0)
+			| (slippery(proxy.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.FEET)) ? 2 : 0);
+		Integer hadEffects = BLIND.put(id, effects);
+		if ((hadEffects == null ? effects != 0 : hadEffects != effects) || (effects != 0 && now % 40 == 0)) {
+			SkyLink.pushEvent(Proto.EV_ACTOR_BLIND, id, 0, 0, 0, 0, effects);
 		}
 		boolean wings = proxy.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.CHEST).is(net.minecraft.world.item.Items.ELYTRA);
 		Boolean had = WINGS.put(id, wings);
 		if ((had == null ? wings : had != wings) || (wings && now % 40 == 0)) {
 			SkyLink.pushEvent(Proto.EV_ACTOR_WINGS, id, 0, 0, 0, 0, wings ? 1 : 0);
 			if (had == null || had != wings) {
-				SkyCraft.LOG.info("SkyCraft: {} {}", proxy.getName().getString(), wings ? "got wings" : "lost its wings");
+				SkyCraft.LOG.info("FNAFSBCraft: {} {}", proxy.getName().getString(), wings ? "got wings" : "lost its wings");
 			}
 		}
 		if (wings && a.name().toLowerCase(java.util.Locale.ROOT).contains("freddy")) {
@@ -394,6 +455,9 @@ public final class SkyCombat {
 				px = flow.x * 0.12;
 				py = flow.y * 0.12;
 				pz = flow.z * 0.12;
+			} else if (level.getBlockState(net.minecraft.core.BlockPos.containing(a.x(), a.y() - 0.1, a.z())).is(net.minecraft.world.level.block.Blocks.HONEY_BLOCK)) {
+				// Honey: sticky, it walks at a crawl.
+				flags = 4;
 			} else if (level.getBlockState(net.minecraft.core.BlockPos.containing(a.x(), a.y() - 0.1, a.z())).is(net.minecraft.world.level.block.Blocks.SLIME_BLOCK)) {
 				if (NEXT_BOUNCE.getOrDefault(id, 0L) <= now) {
 					NEXT_BOUNCE.put(id, now + 12);
@@ -498,7 +562,7 @@ public final class SkyCombat {
 			// Touching an empty boat or minecart: in it goes, like any mob.
 			for (var vehicle : level.getEntitiesOfClass(net.minecraft.world.entity.vehicle.VehicleEntity.class, proxy.getBoundingBox().inflate(0.15), v -> v.getPassengers().isEmpty())) {
 				if (proxy.startRiding(vehicle, true, false)) {
-					SkyCraft.LOG.info("SkyCraft: {} is stuck in a {}", proxy.getName().getString(), vehicle.getType().toShortString());
+					SkyCraft.LOG.info("FNAFSBCraft: {} is stuck in a {}", proxy.getName().getString(), vehicle.getType().toShortString());
 					break;
 				}
 			}
@@ -512,7 +576,7 @@ public final class SkyCombat {
 			surroundings(level, proxy, a);
 		}
 		if (PROXIES.size() != before && (PROXIES.size() % 5 == 0 || PROXIES.size() < 5)) {
-			SkyCraft.LOG.info("SkyCraft: {} Skyrim actors mirrored as hittable stand-ins", PROXIES.size());
+			SkyCraft.LOG.info("FNAFSBCraft: {} Skyrim actors mirrored as hittable stand-ins", PROXIES.size());
 		}
 	}
 
@@ -584,7 +648,7 @@ public final class SkyCombat {
 		boolean blocking = player.isBlocking();
 		boolean hurt = player.hurtServer(level, source, damage);
 		trainDefence(player, damage, blocking && player.getHealth() >= healthBefore - 1.0E-3F);
-		SkyCraft.LOG.info("SkyCraft: Skyrim hit the player for {} ({} Minecraft): health {} -> {}{}", skyrimDamage, damage, healthBefore, player.getHealth(),
+		SkyCraft.LOG.info("FNAFSBCraft: Skyrim hit the player for {} ({} Minecraft): health {} -> {}{}", skyrimDamage, damage, healthBefore, player.getHealth(),
 			hurt ? "" : " (blocked/immune)");
 		if (hurt && attacker != null && (flags & Proto.HURT_POWER_ATTACK) != 0 && !player.isBlocking()) {
 			// Power attacks shove harder, like a sprint hit does in Minecraft.

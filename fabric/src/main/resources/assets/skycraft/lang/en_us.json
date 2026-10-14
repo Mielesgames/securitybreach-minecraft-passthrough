@@ -1,4 +1,5 @@
 {
   "entity.skycraft.skyrim_actor": "Skyrim NPC",
-  "block.skycraft.inverted_block": "Inverted Block"
+  "block.skycraft.inverted_block": "Inverted Block",
+  "item.skycraft.void_filler": "Void Filler"
 }

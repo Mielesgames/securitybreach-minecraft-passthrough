@@ -48,7 +48,7 @@ public final class MirrorWorld {
 				props.load(in);
 			}
 		} catch (java.io.IOException e) {
-			SkyCraft.LOG.warn("SkyCraft: couldn't read {}", file, e);
+			SkyCraft.LOG.warn("FNAFSBCraft: couldn't read {}", file, e);
 			return null;
 		}
 		String join = props.getProperty("join", "").trim();
@@ -62,7 +62,7 @@ public final class MirrorWorld {
 		if (address.isEmpty()) {
 			return;
 		}
-		SkyCraft.LOG.info("SkyCraft: /join {}", address);
+		SkyCraft.LOG.info("FNAFSBCraft: /join {}", address);
 		sessionJoin = address;
 		leaveWorld(minecraft);
 	}
@@ -82,7 +82,7 @@ public final class MirrorWorld {
 			minecraft.gui.hud.getChat().addClientSystemMessage(net.minecraft.network.chat.Component.literal("You're already in your own world."));
 			return;
 		}
-		SkyCraft.LOG.info("SkyCraft: /leave {}", sessionJoin);
+		SkyCraft.LOG.info("FNAFSBCraft: /leave {}", sessionJoin);
 		sessionJoin = null;
 		pendingNote = "Back in your own world.";
 		leaveWorld(minecraft);
@@ -108,7 +108,7 @@ public final class MirrorWorld {
 			pendingNote = sessionJoin != null
 				? "Couldn't stay in " + sessionJoin + " (check the link, and that your friend's world is still open to LAN). You're back in your own world."
 				: "Disconnected. You're back in your own world.";
-			SkyCraft.LOG.info("SkyCraft: disconnected; back to the mirror world");
+			SkyCraft.LOG.info("FNAFSBCraft: disconnected; back to the mirror world");
 			sessionJoin = null;
 			attempted = false;
 			minecraft.gui.setScreen(new TitleScreen());
@@ -116,7 +116,7 @@ public final class MirrorWorld {
 		}
 		if (attempted && minecraft.level == null && minecraft.gui.screen() != null && System.currentTimeMillis() - lastLog > 5000) {
 			lastLog = System.currentTimeMillis();
-			SkyCraft.LOG.info("SkyCraft: still not in the mirror world; current screen {}", minecraft.gui.screen().getClass().getName());
+			SkyCraft.LOG.info("FNAFSBCraft: still not in the mirror world; current screen {}", minecraft.gui.screen().getClass().getName());
 		}
 		if (attempted || minecraft.level != null || minecraft.gui.overlay() != null) {
 			return;
@@ -125,7 +125,7 @@ public final class MirrorWorld {
 		if (!(minecraft.gui.screen() instanceof TitleScreen)) {
 			if (minecraft.gui.screen() != null && System.currentTimeMillis() - lastLog > 5000) {
 				lastLog = System.currentTimeMillis();
-				SkyCraft.LOG.info("SkyCraft: waiting on screen {} before opening the mirror world", minecraft.gui.screen().getClass().getName());
+				SkyCraft.LOG.info("FNAFSBCraft: waiting on screen {} before opening the mirror world", minecraft.gui.screen().getClass().getName());
 			}
 			if (minecraft.gui.screen() == null || minecraft.gui.screen().getClass().getName().contains("Onboarding")) {
 				minecraft.gui.setScreen(new TitleScreen());
@@ -137,18 +137,18 @@ public final class MirrorWorld {
 		// Multiplayer: join a friend's world (their e4mc link, or any server address) instead.
 		String join = sessionJoin != null ? sessionJoin : joinAddress(minecraft);
 		if (join != null) {
-			SkyCraft.LOG.info("SkyCraft: joining {}", join);
+			SkyCraft.LOG.info("FNAFSBCraft: joining {}", join);
 			pendingNote = "Joined " + join + ". Type /leave to go back to your own world.";
 			net.minecraft.client.gui.screens.ConnectScreen.startConnecting(title, minecraft, net.minecraft.client.multiplayer.resolver.ServerAddress.parseString(join),
-				new net.minecraft.client.multiplayer.ServerData("SkyCraft", join, net.minecraft.client.multiplayer.ServerData.Type.OTHER), false, null);
+				new net.minecraft.client.multiplayer.ServerData("FNAFSBCraft", join, net.minecraft.client.multiplayer.ServerData.Type.OTHER), false, null);
 			return;
 		}
 		if (minecraft.getLevelSource().levelExists(SkyCraft.WORLD_NAME)) {
-			SkyCraft.LOG.info("SkyCraft: opening mirror world");
+			SkyCraft.LOG.info("FNAFSBCraft: opening mirror world");
 			minecraft.createWorldOpenFlows().openWorld(SkyCraft.WORLD_NAME, () -> minecraft.gui.setScreen(title));
 			return;
 		}
-		SkyCraft.LOG.info("SkyCraft: creating mirror world");
+		SkyCraft.LOG.info("FNAFSBCraft: creating mirror world");
 		LevelSettings settings = new LevelSettings(
 			SkyCraft.WORLD_NAME,
 			GameType.SURVIVAL,

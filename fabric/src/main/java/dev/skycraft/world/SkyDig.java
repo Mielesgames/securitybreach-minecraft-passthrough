@@ -114,6 +114,22 @@ public final class SkyDig {
 			return bits != null && ((bits[bit >> 6] >>> (bit & 63)) & 1L) != 0;
 		}
 
+		DugColumn without(int world, int x, int y, int z) {
+			int sy = y >> 4;
+			int bit = (x & 15) + 16 * (z & 15) + 256 * (y & 15);
+			List<DugSection> out = new ArrayList<>(this.sections.size());
+			for (DugSection s : this.sections) {
+				if (s.world == world && s.sectionY == sy && s.bits.length == 64) {
+					long[] bits = s.bits.clone();
+					bits[bit >> 6] &= ~(1L << (bit & 63));
+					out.add(new DugSection(world, sy, bits));
+				} else {
+					out.add(s);
+				}
+			}
+			return new DugColumn(List.copyOf(out));
+		}
+
 		DugColumn with(int world, int x, int y, int z) {
 			int sy = y >> 4;
 			int bit = (x & 15) + 16 * (z & 15) + 256 * (y & 15);
@@ -145,7 +161,7 @@ public final class SkyDig {
 
 	/** Loads the class (registers the attachment) at mod start. */
 	public static void init() {
-		SkyCraft.LOG.info("SkyCraft: digging into Skyrim registered ({})", DUG.identifier());
+		SkyCraft.LOG.info("FNAFSBCraft: digging into Skyrim registered ({})", DUG.identifier());
 	}
 
 	public static DugColumn column(LevelChunk chunk) {
@@ -191,6 +207,103 @@ public final class SkyDig {
 			}
 		}
 		level.levelEvent(LevelEvent.PARTICLES_AND_SOUND_DESTROY_BLOCK, pos, Block.getId(state));
+		if (PASSTHROUGH) {
+			if (level.getBlockState(pos).is(Blocks.BARRIER)) {
+				level.setBlock(pos, Blocks.AIR.defaultBlockState(), 3);
+			}
+			underground(level, pos);
+		}
+	}
+
+	/** Under Security Breach's floors is nothing: what a hole goes down into is made of this. */
+	public static final Block FOUNDATION = Blocks.POLISHED_DEEPSLATE;
+
+	/**
+	 * Security Breach's floors and walls are shells with nothing behind them. A hole dug into one gets
+	 * ground: a foundation block under it, so the player drops one block instead of into the void.
+	 * Breaking a foundation block does the same one level down. (The cells beside the hole, under the
+	 * floor there, get an invisible wall that only collides: see wallShape.)
+	 */
+	public static void underground(ServerLevel level, BlockPos pos) {
+		BlockPos below = pos.below();
+		// Only where nothing of the game's is under the hole: a hole in a wall stands on the game's
+		// floor, and a block there would stick up out of it.
+		if (level.getBlockState(below).isAir() && !SkyCollision.hasGeometry(below)) {
+			level.setBlock(below, FOUNDATION.defaultBlockState(), 3);
+		}
+	}
+
+	/**
+	 * /repairworld: every hole within `chunks` chunks of the players is Security Breach's again (and
+	 * the foundation blocks under them go), and old inverted blocks there with them. Returns how many
+	 * cells were filled.
+	 */
+	public static int repairAll(ServerLevel level, int chunks) {
+		int filled = 0;
+		java.util.Set<Long> done = new java.util.HashSet<>();
+		for (var player : level.players()) {
+			int cx = player.blockPosition().getX() >> 4, cz = player.blockPosition().getZ() >> 4;
+			for (int x = cx - chunks; x <= cx + chunks; x++) {
+				for (int z = cz - chunks; z <= cz + chunks; z++) {
+					if (!done.add(net.minecraft.world.level.ChunkPos.pack(x, z)) || !level.hasChunk(x, z)) {
+						continue;
+					}
+					LevelChunk chunk = level.getChunk(x, z);
+					DugColumn column = column(chunk);
+					for (DugSection section : column.sections()) {
+						for (int bit = 0; bit < 4096; bit++) {
+							if (((section.bits()[bit >> 6] >>> (bit & 63)) & 1L) == 0) {
+								continue;
+							}
+							BlockPos pos = new BlockPos((x << 4) + (bit & 15), (section.sectionY() << 4) + (bit >> 8), (z << 4) + ((bit >> 4) & 15));
+							if (level.getBlockState(pos.below()).is(FOUNDATION)) {
+								level.setBlock(pos.below(), Blocks.AIR.defaultBlockState(), 3);
+							}
+							filled++;
+						}
+					}
+					if (!column.sections().isEmpty()) {
+						chunk.setAttached(DUG, DugColumn.EMPTY);
+					}
+					// Inverted blocks from before holes were mined.
+					var sections = chunk.getSections();
+					for (int i = 0; i < sections.length; i++) {
+						if (sections[i] == null || sections[i].hasOnlyAir() || !sections[i].maybeHas(state -> state.is(SkyCraft.INVERTED_BLOCK))) {
+							continue;
+						}
+						int baseY = chunk.getSectionYFromSectionIndex(i) << 4;
+						for (int y = 0; y < 16; y++) {
+							for (int zz = 0; zz < 16; zz++) {
+								for (int xx = 0; xx < 16; xx++) {
+									if (sections[i].getBlockState(xx, y, zz).is(SkyCraft.INVERTED_BLOCK)) {
+										level.setBlock(new BlockPos((x << 4) + xx, baseY + y, (z << 4) + zz), Blocks.AIR.defaultBlockState(), 3);
+										filled++;
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		return filled;
+	}
+
+	/**
+	 * The Void Filler: a dug cell is Security Breach's again (its floor or wall comes back), and the
+	 * foundation under it goes. Returns whether there was a hole.
+	 */
+	public static boolean fill(ServerLevel level, int world, BlockPos pos) {
+		LevelChunk chunk = level.getChunkAt(pos);
+		DugColumn column = column(chunk);
+		if (!column.isDug(world, pos.getX(), pos.getY(), pos.getZ())) {
+			return false;
+		}
+		chunk.setAttached(DUG, column.without(world, pos.getX(), pos.getY(), pos.getZ()));
+		if (level.getBlockState(pos.below()).is(FOUNDATION) && !isDug(level, world, pos.below())) {
+			level.setBlock(pos.below(), Blocks.AIR.defaultBlockState(), 3);
+		}
+		return true;
 	}
 
 	/** Cells around a mined one that are wholly inside Skyrim's geometry: blocks now. */
@@ -679,6 +792,34 @@ public final class SkyDig {
 		DugColumn here = columnFor(getter, x, z);
 		int world = worldFor(level);
 		if (here != null && here.isDug(world, x, y, z)) {
+			return null;
+		}
+		// Security Breach: beside a hole, under the floor that is still there, nothing would stop the
+		// player crawling off sideways. Solid from the cell's bottom up to the floor's top: it can't be
+		// pointed at (it isn't a block), so the floor beside a hole is mined like any other.
+		if (PASSTHROUGH) {
+			boolean beside = false;
+			for (Direction d : Direction.Plane.HORIZONTAL) {
+				DugColumn column = columnFor(getter, x + d.getStepX(), z + d.getStepZ());
+				if (column != null && column.isDug(world, x + d.getStepX(), y, z + d.getStepZ())) {
+					beside = true;
+					break;
+				}
+			}
+			if (!beside) {
+				return null;
+			}
+			// Inside the game's floor (open above it): up to the floor's top. A wall (the game's
+			// geometry above it too) has its own collision, and a box here would stick out of it.
+			if (SkyCollision.hasGeometry(pos)) {
+				return SkyCollision.hasGeometry(pos.above()) ? null
+					: Shapes.box(0.0, 0.0, 0.0, 1.0, Math.max(SkyCollision.groundTop(pos), 0.125), 1.0);
+			}
+			// Under the game's floor (it runs a block or two above): nothing is there, so a whole wall.
+			// Open air beside a hole (no floor above it) stays open.
+			if (SkyCollision.hasGeometry(pos.above()) || SkyCollision.hasGeometry(pos.above(2))) {
+				return Shapes.block();
+			}
 			return null;
 		}
 		boolean nextToDug = false;

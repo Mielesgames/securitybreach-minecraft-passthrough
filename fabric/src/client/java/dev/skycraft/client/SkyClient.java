@@ -32,7 +32,7 @@ public final class SkyClient {
 
 	static {
 		if (PASSTHROUGH) {
-			SkyCraft.LOG.info("SkyCraft: passthrough mode (no Skyrim collision; height comes from the host game)");
+			SkyCraft.LOG.info("FNAFSBCraft: passthrough mode (no Skyrim collision; height comes from the host game)");
 		}
 	}
 	private static boolean startedHidden;
@@ -107,7 +107,7 @@ public final class SkyClient {
 		}
 		if (nowLinked != linked) {
 			linked = nowLinked;
-			SkyCraft.LOG.info("SkyCraft: Skyrim link {}", linked ? "up" : "down");
+			SkyCraft.LOG.info("FNAFSBCraft: Skyrim link {}", linked ? "up" : "down");
 			if (linked) {
 				tookOver = true;
 				unlinkedHold = null;
@@ -182,7 +182,7 @@ public final class SkyClient {
 		long now = System.currentTimeMillis();
 		if (QUIT_WITH_SKYRIM && START_HIDDEN && pid == 0 && !tookOver && !gaveUpWaiting && now - STARTED_AT > NEVER_CONNECTED_QUIT_MS) {
 			gaveUpWaiting = true;
-			SkyCraft.LOG.warn("SkyCraft: started hidden but Skyrim never connected in {} minutes; quitting", NEVER_CONNECTED_QUIT_MS / 60000);
+			SkyCraft.LOG.warn("FNAFSBCraft: started hidden but Skyrim never connected in {} minutes; quitting", NEVER_CONNECTED_QUIT_MS / 60000);
 			minecraft.stop();
 			return;
 		}
@@ -197,7 +197,7 @@ public final class SkyClient {
 		if (skyrimGoneSince == 0) {
 			skyrimGoneSince = now;
 		} else if (now - skyrimGoneSince > 5000) {
-			SkyCraft.LOG.info("SkyCraft: Skyrim (pid {}) has closed; saving and quitting", pid);
+			SkyCraft.LOG.info("FNAFSBCraft: Skyrim (pid {}) has closed; saving and quitting", pid);
 			minecraft.stop();
 		}
 	}
@@ -313,7 +313,7 @@ public final class SkyClient {
 			if (safe.y != holdPos.y) {
 				player.setPos(safe.x, safe.y, safe.z);
 				player.yo = safe.y;
-				SkyCraft.LOG.info("SkyCraft: lifted player {} blocks out of the ground", String.format("%.3f", safe.y - holdPos.y));
+				SkyCraft.LOG.info("FNAFSBCraft: lifted player {} blocks out of the ground", String.format("%.3f", safe.y - holdPos.y));
 			}
 			holdPos = null;
 			return;
@@ -345,6 +345,8 @@ public final class SkyClient {
 			}
 		}
 		reportRedstone(minecraft, player);
+		SecurityBreachAchievements.tick(minecraft);
+		showFreddyPreview(minecraft, player);
 		flyFreddy(player);
 		if (player.isDeadOrDying()) {
 			// Nothing here is meant to kill the player, and the death screen can't be seen: get up again.
@@ -378,6 +380,10 @@ public final class SkyClient {
 			return;
 		}
 		boolean wings = mule.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.CHEST).is(net.minecraft.world.item.Items.ELYTRA);
+		if (wings != freddyHadWings) {
+			freddyHadWings = wings;
+			dev.skycraft.SkyCraft.LOG.info("FNAFSBCraft: riding Freddy, {}", wings ? "he has wings: flying" : "no wings (the client sees no elytra on him)");
+		}
 		mule.setNoGravity(wings);
 		if (!wings) {
 			return;
@@ -391,8 +397,30 @@ public final class SkyClient {
 		} else {
 			motion = new Vec3(motion.x * 0.8, vy, motion.z * 0.8);
 		}
-		mule.setDeltaMovement(motion);
+		// The mule's own riding code sets its motion every tick from the rider's keys (and Space is
+		// its jump), so a motion set here was lost: it is moved here itself, against blocks like
+		// any move, and keeps only a little of it for the mule's tick.
+		mule.move(net.minecraft.world.entity.MoverType.SELF, motion);
+		mule.setDeltaMovement(motion.scale(0.1));
 		mule.resetFallDistance();
+	}
+
+	private static boolean freddyHadWings;
+
+	/**
+	 * Freddy's mule screen shows an invisible mule in its preview box. The host draws Freddy there
+	 * instead, so it is told where the box is (the horse screen's layout: 176 x 166, the box at 26, 18,
+	 * 52 square), every tick while the screen is open.
+	 */
+	private static void showFreddyPreview(Minecraft minecraft, LocalPlayer player) {
+		if (!(minecraft.gui.screen() instanceof net.minecraft.client.gui.screens.inventory.HorseInventoryScreen)
+			|| !dev.skycraft.combat.FreddyMount.isFreddy(player.getVehicle())) {
+			return;
+		}
+		var window = minecraft.getWindow();
+		int left = (window.getGuiScaledWidth() - 176) / 2;
+		int top = (window.getGuiScaledHeight() - 166) / 2;
+		SkyLink.pushEvent(Proto.EV_PREVIEW, 0, left + 26, top + 18, 52, 52, 1);
 	}
 
 	// Redstone sources that are on, as the host game was last told.
@@ -494,7 +522,7 @@ public final class SkyClient {
 				}
 			});
 		}
-		SkyCraft.LOG.info("SkyCraft: teleported to {} {} {}", x, y, z);
+		SkyCraft.LOG.info("FNAFSBCraft: teleported to {} {} {}", x, y, z);
 	}
 
 	/** After GameRenderer.render(): report the player to Skyrim and ship the overlay frame. */
@@ -546,6 +574,9 @@ public final class SkyClient {
 			}
 			if (player.getVehicle() instanceof net.minecraft.world.entity.decoration.ArmorStand) {
 				flags |= Proto.MC_HIDING;
+			}
+			if (dev.skycraft.combat.SkyCombat.wearable(player.getMainHandItem()) != null) {
+				flags |= Proto.MC_HOLDS_PUMPKIN;
 			}
 			if (player.getMainHandItem().is(net.minecraft.world.item.Items.SHEARS)) {
 				flags |= Proto.MC_HOLDS_SHEARS;
@@ -613,7 +644,7 @@ public final class SkyClient {
 				WorldExporter.frame(minecraft, minecraft.getDeltaTracker().getGameTimeDeltaPartialTick(false));
 			} catch (RuntimeException e) {
 				if (exporterErrors++ < 5) {
-					SkyCraft.LOG.error("SkyCraft: world export failed", e);
+					SkyCraft.LOG.error("FNAFSBCraft: world export failed", e);
 				}
 			}
 			FrameExporter.capture(minecraft);
@@ -668,7 +699,7 @@ public final class SkyClient {
 		}
 		windowHidden = true;
 		SDLVideo.SDL_HideWindow(minecraft.getWindow().handle());
-		SkyCraft.LOG.info("SkyCraft: game window hidden (run with -Dskycraft.showWindow=true to keep it)");
+		SkyCraft.LOG.info("FNAFSBCraft: game window hidden (run with -Dskycraft.showWindow=true to keep it)");
 	}
 
 	private static void applyViewportSize(Minecraft minecraft) {
@@ -680,6 +711,6 @@ public final class SkyClient {
 		appliedViewportW = w;
 		appliedViewportH = h;
 		minecraft.getWindow().setWindowed(w, h);
-		SkyCraft.LOG.info("SkyCraft: sizing overlay to Skyrim viewport {}x{}", w, h);
+		SkyCraft.LOG.info("FNAFSBCraft: sizing overlay to Skyrim viewport {}x{}", w, h);
 	}
 }

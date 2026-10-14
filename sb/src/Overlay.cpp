@@ -34,6 +34,7 @@ namespace overlay
         ID3D11VertexShader* vs = nullptr;
         ID3D11PixelShader* ps = nullptr;
         ID3D11PixelShader* ps_invert = nullptr;
+        ID3D11PixelShader* ps_plain = nullptr;
         ID3D11BlendState* blend = nullptr;
         ID3D11BlendState* invert_blend = nullptr;
         ID3D11SamplerState* sampler = nullptr;
@@ -74,6 +75,10 @@ float4 Overlay(float2 uv) {
 float4 PSInvert(VSOut i) : SV_Target {
     if (!InInvertRect(i.pos.xy)) discard;
     return float4(Overlay(i.uv).rgb, 0);
+}
+// A picture as it is (Freddy filmed by the game), into the viewport it is drawn in.
+float4 PSPlain(VSOut i) : SV_Target {
+    return float4(overlay.Sample(samp, i.uv).rgb, 1);
 }
 float4 PSMain(VSOut i) : SV_Target {
     if (InInvertRect(i.pos.xy)) return 0;
@@ -175,6 +180,16 @@ float4 PSMain(VSOut i) : SV_Target {
             safe_release(vs_blob);
             safe_release(ps_blob);
             safe_release(ps_invert_blob);
+
+            // Optional: a picture of the game in a box (Freddy in his mule screen).
+            ID3DBlob* ps_plain_blob = nullptr;
+
+            if (compile("PSPlain", "ps_5_0", &ps_plain_blob))
+            {
+                device->CreatePixelShader(ps_plain_blob->GetBufferPointer(), ps_plain_blob->GetBufferSize(), nullptr, &ps_plain);
+            }
+
+            safe_release(ps_plain_blob);
 
             D3D11_BLEND_DESC bd{};
             bd.RenderTarget[0].BlendEnable = TRUE;
@@ -500,6 +515,32 @@ float4 PSMain(VSOut i) : SV_Target {
                     context->OMSetBlendState(invert_blend, factor, 0xFFFFFFFF);
                     context->PSSetShader(ps_invert, nullptr, 0);
                     context->Draw(3, 0);
+                }
+
+                // Freddy in his mule screen's preview box, as the game films him.
+                auto* picture = g_state.preview_on.load(std::memory_order_relaxed) ? world::capture_view(device) : nullptr;
+
+                if (picture != nullptr && ps_plain != nullptr)
+                {
+                    const int scale = g_state.gui_scale.load(std::memory_order_relaxed);
+                    const float g = float(scale) * (tex_w ? float(bb_desc.Width) / float(tex_w) : 1.0f);
+                    const D3D11_VIEWPORT box{
+                        float(g_state.preview_x.load(std::memory_order_relaxed)) * g,
+                        float(g_state.preview_y.load(std::memory_order_relaxed)) * g,
+                        float(g_state.preview_w.load(std::memory_order_relaxed)) * g,
+                        float(g_state.preview_h.load(std::memory_order_relaxed)) * g,
+                        0,
+                        1
+                    };
+
+                    if (scale > 0 && box.Width > 1.0f && box.Height > 1.0f)
+                    {
+                        context->RSSetViewports(1, &box);
+                        context->OMSetBlendState(nullptr, factor, 0xFFFFFFFF);
+                        context->PSSetShader(ps_plain, nullptr, 0);
+                        context->PSSetShaderResources(0, 1, &picture);
+                        context->Draw(3, 0);
+                    }
                 }
             }
 

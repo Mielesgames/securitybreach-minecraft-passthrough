@@ -33,6 +33,6 @@ public final class HidingSeat {
 		}
 		seat = fresh;
 		boolean seated = player.startRiding(fresh, true, false);
-		SkyCraft.LOG.info("SkyCraft: hiding seat at {}, {}, {}: {}", x, y, z, seated ? "the player sits" : "the player could not sit");
+		SkyCraft.LOG.info("FNAFSBCraft: hiding seat at {}, {}, {}: {}", x, y, z, seated ? "the player sits" : "the player could not sit");
 	}
 }

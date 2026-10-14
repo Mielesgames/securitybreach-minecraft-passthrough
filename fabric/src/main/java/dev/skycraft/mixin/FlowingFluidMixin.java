@@ -99,7 +99,7 @@ public abstract class FlowingFluidMixin {
 		}
 		if (skycraft$logged++ < 4) {
 			FluidState fluid = sourceState.getFluidState();
-			dev.skycraft.SkyCraft.LOG.info("SkyCraft: fluid flow refused ({}): {} -> {} going {}, fluid {} amount {}, Skyrim ground height there {}", why,
+			dev.skycraft.SkyCraft.LOG.info("FNAFSBCraft: fluid flow refused ({}): {} -> {} going {}, fluid {} amount {}, Skyrim ground height there {}", why,
 				sourcePos.toShortString(), targetPos.toShortString(), direction, fluid.getType(), fluid.getAmount(), String.format("%.2f", ground));
 		}
 	}

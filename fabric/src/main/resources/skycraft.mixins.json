@@ -14,6 +14,7 @@
     "FallingBlockMixin",
     "FlowingFluidMixin",
     "IronGolemMixin",
+    "LivingEntityAccessor",
     "ItemMixin",
     "MinecraftServerFlightMixin",
     "PlayerEdgeMixin",

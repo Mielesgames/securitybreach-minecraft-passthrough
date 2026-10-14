@@ -42,7 +42,7 @@ public final class InputBridge {
 				}
 				if (a != 0 && clickLogs++ < 20) {
 					var hit = minecraft.hitResult;
-					dev.skycraft.SkyCraft.LOG.info("SkyCraft: click {} -> {} {} (grabbed {}, screen {})", code, hit == null ? "null" : hit.getType(),
+					dev.skycraft.SkyCraft.LOG.info("FNAFSBCraft: click {} -> {} {} (grabbed {}, screen {})", code, hit == null ? "null" : hit.getType(),
 						hit instanceof net.minecraft.world.phys.EntityHitResult eh ? eh.getEntity().getName().getString() : hit == null ? "" : hit.getLocation(),
 						minecraft.mouseHandler.isMouseGrabbed(), minecraft.gui.screen());
 				}
@@ -105,12 +105,29 @@ public final class InputBridge {
 					});
 				}
 			}
+			case Proto.IN_WEAR_PUMPKIN -> {
+				// A carved pumpkin given to a Security Breach character: on its head it goes.
+				var server = minecraft.getSingleplayerServer();
+				if (server != null && minecraft.player != null) {
+					var uuid = minecraft.player.getUUID();
+					int formId = a;
+					server.execute(() -> {
+						var player = server.getPlayerList().getPlayer(uuid);
+						if (player != null) {
+							dev.skycraft.combat.SkyCombat.wearPumpkin(player, formId);
+						}
+					});
+				}
+			}
+			case Proto.IN_ACHIEVEMENT_TEXT -> SecurityBreachAchievements.text(code, a, b, c);
+			case Proto.IN_ACHIEVEMENT_DONE -> SecurityBreachAchievements.done(minecraft, code, a != 0, b != 0, c);
 			case Proto.IN_SHEAR -> {
 				// Shears on a Security Breach character: what its stand-in wears (an elytra) comes off.
 				var server = minecraft.getSingleplayerServer();
-				if (server != null) {
+				if (server != null && minecraft.player != null) {
 					int formId = a;
-					server.execute(() -> dev.skycraft.combat.SkyCombat.shear(formId));
+					var uuid = minecraft.player.getUUID();
+					server.execute(() -> dev.skycraft.combat.SkyCombat.shear(server.getPlayerList().getPlayer(uuid), formId));
 				}
 			}
 			case Proto.IN_LEASH -> {

@@ -29,8 +29,12 @@ namespace collision
 
         // Must match SkyCollision.REGION_SIZE on the Minecraft side.
         constexpr int kRegionBlocks = 8;
-        // Cells per block along each axis: a cell is a quarter block (17.5 Unreal units).
-        constexpr int kCellsPerBlock = 4;
+        // Cells per block along each axis: a cell is an eighth of a block (8.75 Unreal units).
+        // Was a quarter (14 Oct): doorways came in up to a quarter block narrower per side, and
+        // Steve needed a thinner body to fit through them.
+        constexpr int kCellsPerBlock = 8;
+        // Minecraft's voxels are eighths of a block: how many go along one side of a cell.
+        constexpr int kVoxelsPerCell = 8 / kCellsPerBlock;
         constexpr int kRegionCells = kRegionBlocks * kCellsPerBlock;
         constexpr double kCellUnits = proto::kUnitsPerBlock / kCellsPerBlock;
 
@@ -39,7 +43,8 @@ namespace collision
         // A region that is done is looked at again after this long (doors open and close).
         constexpr ULONGLONG kRescanMs = 5000;
         // Time per tick spent on queries: more while the player's surroundings are still unknown.
-        constexpr double kBudgetUrgentMs = 4.0;
+        // Eighth-block cells take more looks: a little more time while regions are unknown.
+        constexpr double kBudgetUrgentMs = 6.0;
         constexpr double kBudgetIdleMs = 0.6;
 
         constexpr std::uint32_t kEpoch = 1;
@@ -258,7 +263,7 @@ namespace collision
         }
 
         // ---- Minecraft cells <-> Unreal ---------------------------------------------------------
-        // A point in cells (quarter blocks, Minecraft axes) is (x, z, y) * kCellUnits in Unreal.
+        // A point in cells (eighth blocks, Minecraft axes) is (x, z, y) * kCellUnits in Unreal.
 
         // Is anything that blocks a pawn inside this cube of cells?
         bool box_blocked(RC::Unreal::UObject* character, int cx, int cy, int cz, int size)
@@ -541,15 +546,15 @@ namespace collision
                         block.y = region.ry * kRegionBlocks + by;
                         block.z = region.rz * kRegionBlocks + bz;
 
-                        const int vx = (x % kCellsPerBlock) * 2;
-                        const int vy = (y % kCellsPerBlock) * 2;
-                        const int vz = (z % kCellsPerBlock) * 2;
+                        const int vx = (x % kCellsPerBlock) * kVoxelsPerCell;
+                        const int vy = (y % kCellsPerBlock) * kVoxelsPerCell;
+                        const int vz = (z % kCellsPerBlock) * kVoxelsPerCell;
 
-                        for (int dy = 0; dy < 2; ++dy)
+                        for (int dy = 0; dy < kVoxelsPerCell; ++dy)
                         {
-                            for (int dz = 0; dz < 2; ++dz)
+                            for (int dz = 0; dz < kVoxelsPerCell; ++dz)
                             {
-                                for (int dx = 0; dx < 2; ++dx)
+                                for (int dx = 0; dx < kVoxelsPerCell; ++dx)
                                 {
                                     block.bits[vy + dy] |= std::uint64_t(1) << ((vz + dz) * 8 + (vx + dx));
                                 }
@@ -654,7 +659,7 @@ namespace collision
             }
 
             // 2) Where the floor really is: the top cell of every stack holds a surface somewhere
-            //    inside it. A ray finds the exact height, so floors and ramps aren't quarter-block steps.
+            //    inside it. A ray finds the exact height, so floors and ramps aren't eighth-block steps.
             const int total = kRegionCells * kRegionCells * kRegionCells;
 
             for (; region.refine_at < total; ++region.refine_at)

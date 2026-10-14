@@ -32,12 +32,12 @@ public abstract class ServerPlayerMixin {
 			if (net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking.canSend(self, dev.skycraft.net.SkyNet.Died.TYPE)) {
 				net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking.send(self, new dev.skycraft.net.SkyNet.Died(attacker));
 			}
-			SkyCraft.LOG.info("SkyCraft: guest {} died ({}); telling their Skyrim", self.getPlainTextName(), source.getMsgId());
+			SkyCraft.LOG.info("FNAFSBCraft: guest {} died ({}); telling their Skyrim", self.getPlainTextName(), source.getMsgId());
 			return;
 		}
 		if (SkyLink.active()) {
 			SkyLink.pushEvent(Proto.EV_PLAYER_DIED, attacker, 0, 0, 0, 0, 0);
-			SkyCraft.LOG.info("SkyCraft: player died ({}); telling Skyrim", source.getMsgId());
+			SkyCraft.LOG.info("FNAFSBCraft: player died ({}); telling Skyrim", source.getMsgId());
 		}
 	}
 }

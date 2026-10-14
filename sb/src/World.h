@@ -82,5 +82,14 @@ namespace world
     // last call, so the collision there can be felt out again. Game thread.
     void take_dug_changes(std::vector<std::array<int, 3>>& out);
 
+    // The game's own camera picture of something (a SceneCapture2D drawing
+    // into a render target of exactly kCaptureWidth x kCaptureHeight, which
+    // nothing else uses): looked for while wanted, given to the overlay.
+    inline constexpr int kCaptureWidth = 252;
+    inline constexpr int kCaptureHeight = 253;
+    void set_capture_wanted(bool wanted);
+    // Present thread: the picture to draw, or null. Owned by world.
+    ID3D11ShaderResourceView* capture_view(ID3D11Device* device);
+
     void shutdown();
 }

@@ -107,13 +107,14 @@ VSOut VSMain(VSIn i) {
 }
 // Minecraft's fixed shading per face, by Direction ordinal + 1 (0: none).
 static const float kFaceShade[8] = { 1.0, 0.5, 1.0, 0.8, 0.8, 0.6, 0.6, 1.0 };
-bool InPit(float2 pixel, float d);
+bool HiddenByGame(float2 pixel, float d, float viewZ, float surfaceZ);
 float4 PSMain(VSOut i) : SV_Target {
     if (depthInfo.z > 0.5) {
         // The game's depth: near / distance, 0 where there is nothing (sky).
         float d = sceneDepth.Load(int3(i.pos.xy * depthInfo.xy, 0));
-        // Behind the game's geometry: hidden, unless that geometry is dug away there.
-        if (d > 0 && i.viewZ > (offset.w / d) * 1.002 + 1.5 && !InPit(i.pos.xy, d)) discard;
+        // Behind the game's geometry: hidden, unless that geometry is dug away there (and then
+        // only up to the hole's far wall).
+        if (HiddenByGame(i.pos.xy, d, i.viewZ, d > 0 ? offset.w / d : 1e30)) discard;
     }
     float4 t = (i.flags & 4) ? float4(1, 1, 1, 1) : atlas.Sample(samp, i.uv);
     bool translucent = (i.flags & 2) != 0;
@@ -166,20 +167,12 @@ bool InPit(float2 pixel, float d) {
     // A hair further along the ray: the surface itself is on the pit's edge.
     return PitAt(m + normalize(m - cam) * 0.01) >= 0;
 }
-// A pit: where the game's surface is dug away, the inside of the hole is drawn instead. The ray
-// goes through the pits it meets (a hole can be several blocks) and the face it leaves the last
-// one by is its wall or floor, darker the deeper it is.
-float4 PSPit(float4 pos : SV_Position) : SV_Target {
-    float d = sceneDepth.Load(int3(pos.xy * lens.zw, 0));
-    if (d <= 0 || !InPit(pos.xy, d)) discard;
-    float3 u = SurfaceAt(pos.xy, d);
-    float3 cam = float3(camPos.x, camPos.z, camPos.y) / 70.0;
-    float3 m = float3(u.x, u.z, u.y) / 70.0;
-    float3 dir = normalize(m - cam);
+// Walks a ray (Minecraft coordinates) through the pits it is in, from `p` on: where it leaves the
+// last one, by which face (axis 0 x, 1 y, 2 z), and how far it went inside them.
+float3 March(float3 p, float3 dir, out int axis, out float depth) {
     float3 inv = 1.0 / (abs(dir) < 1e-5 ? 1e-5 * sign(dir + 1e-6) : dir);
-    float3 p = m + dir * 0.01;
-    int axis = 1;
-    float depth = 0;
+    axis = 1;
+    depth = 0;
     for (int step = 0; step < 8; ++step) {
         int k = PitAt(p);
         if (k < 0) break;
@@ -191,11 +184,83 @@ float4 PSPit(float4 pos : SV_Position) : SV_Target {
         p += dir * (exitT + 0.002);
         depth += exitT;
     }
-    // Minecraft's face shading: floors light, walls darker; deeper is darker still.
-    float shade = axis == 1 ? (dir.y < 0 ? 0.55 : 0.35) : (axis == 0 ? 0.42 : 0.48);
-    float fade = exp(-depth * 0.35);
-    float3 c = float3(0.12, 0.09, 0.15) * shade * (0.35 + 0.65 * fade);
+    return p;
+}
+// The face a ray leaves a pit by looks like the ground under the Pizzaplex (deepslate tiles, like
+// the foundation blocks a hole gets), not like the void: 16 pixels a block, each a grey of its own,
+// with the tiles' seams darker. Minecraft's face shading on top; deeper is a little darker.
+float4 PitWall(float3 p, float3 dir, int axis, float depth) {
+    float2 uv = axis == 1 ? p.xz : (axis == 0 ? p.zy : p.xy);
+    float2 px = floor(uv * 16.0);
+    float noise = frac(sin(dot(px, float2(12.9898, 78.233))) * 43758.5453);
+    float2 inTile = fmod(fmod(px, 8.0) + 8.0, 8.0);
+    float row = fmod(floor(px.y / 8.0), 2.0);
+    float seamX = fmod(fmod(px.x + row * 4.0, 8.0) + 8.0, 8.0);
+    bool seam = inTile.y < 1.0 || seamX < 1.0;
+    float grey = seam ? 0.13 : 0.24 + 0.1 * noise;
+    float shade = axis == 1 ? (dir.y < 0 ? 0.9 : 0.5) : (axis == 0 ? 0.6 : 0.75);
+    float fade = exp(-depth * 0.18);
+    float3 c = float3(grey * 0.95, grey * 0.97, grey * 1.05) * shade * (0.45 + 0.55 * fade);
     return float4(c, 1);
+}
+// How far along the view (Unreal units) a point in Minecraft coordinates is.
+float ViewZOf(float3 p) {
+    return dot(float3(p.x, p.z, p.y) * 70.0 - camPos.xyz, camForward.xyz);
+}
+// Whether something of Minecraft's at this pixel, `viewZ` away, is hidden by the game: behind its
+// surface (`surfaceZ` away), unless that surface is dug away, and then still if it lies beyond
+// the hole's far wall. From inside a hole, what lies beyond its walls is hidden too.
+bool HiddenByGame(float2 pixel, float d, float viewZ, float surfaceZ) {
+    bool pits = pitInfo.x > 0.5;
+    float3 cam = float3(camPos.x, camPos.z, camPos.y) / 70.0;
+    float2 ndc = float2(pixel.x / screen.x * 2 - 1, 1 - pixel.y / screen.y * 2);
+    float3 ray = camForward.xyz + camRight.xyz * (ndc.x * lens.x) + camUp.xyz * (ndc.y * lens.y);
+    float3 dir = normalize(float3(ray.x, ray.z, ray.y));
+    int axis;
+    float depth;
+    if (d > 0 && viewZ > surfaceZ * 1.002 + 1.5) {
+        if (!pits || !InPit(pixel, d)) return true;
+        float3 u = SurfaceAt(pixel, d);
+        float3 m = float3(u.x, u.z, u.y) / 70.0;
+        float3 p = March(m + dir * 0.01, dir, axis, depth);
+        return viewZ > ViewZOf(p) + 1.5;
+    }
+    if (pits && PitAt(cam) >= 0) {
+        float3 p = March(cam, dir, axis, depth);
+        if (!(axis == 1 && dir.y > 0) && viewZ > ViewZOf(p) + 1.5) return true;
+    }
+    return false;
+}
+// A pit: where the game's surface is dug away, the inside of the hole is drawn instead.
+// Seen from outside, the ray goes in where the game's surface was. Seen from inside (the player in
+// the hole), the ray starts at the camera: under the game's floors there is nothing, so whatever
+// the ray leaves the hole by sideways or downwards is the hole's wall. Upwards is the way out.
+float4 PSPit(float4 pos : SV_Position) : SV_Target {
+    if (pitInfo.x < 0.5) discard;
+    float d = sceneDepth.Load(int3(pos.xy * lens.zw, 0));
+    float3 cam = float3(camPos.x, camPos.z, camPos.y) / 70.0;
+    float2 ndc = float2(pos.x / screen.x * 2 - 1, 1 - pos.y / screen.y * 2);
+    float3 ray = camForward.xyz + camRight.xyz * (ndc.x * lens.x) + camUp.xyz * (ndc.y * lens.y);
+    float3 dir = normalize(float3(ray.x, ray.z, ray.y));
+    int axis;
+    float depth;
+    if (d > 0 && InPit(pos.xy, d)) {
+        float3 u = SurfaceAt(pos.xy, d);
+        float3 m = float3(u.x, u.z, u.y) / 70.0;
+        float3 p = March(m + dir * 0.01, dir, axis, depth);
+        return PitWall(p, dir, axis, depth);
+    }
+    if (PitAt(cam) < 0) discard;
+    float3 p = March(cam, dir, axis, depth);
+    // Out through the top: the room above, as the game drew it.
+    if (axis == 1 && dir.y > 0) discard;
+    // Something of the game's in front of the wall (a step, a crate in the hole): it stays.
+    if (d > 0) {
+        float3 u = SurfaceAt(pos.xy, d);
+        float3 m = float3(u.x, u.z, u.y) / 70.0;
+        if (length(m - cam) < depth) discard;
+    }
+    return PitWall(p, dir, axis, depth);
 }
 float4 PSLight(float4 pos : SV_Position) : SV_Target {
     float d = sceneDepth.Load(int3(pos.xy * lens.zw, 0));
@@ -704,6 +769,65 @@ float4 PSLight(float4 pos : SV_Position) : SV_Target {
             consider(view);
         }
 
+        // The game's camera picture (world::set_capture_wanted): the texture the
+        // SceneCapture draws into, recognised by its size.
+        std::atomic<bool> g_capture_wanted{ false };
+        std::mutex g_capture_mutex;
+        ID3D11Texture2D* g_capture_texture = nullptr;
+        ID3D11ShaderResourceView* g_capture_srv = nullptr;
+        ID3D11Texture2D* g_capture_srv_of = nullptr;
+
+        void consider_capture(UINT count, ID3D11RenderTargetView* const* targets)
+        {
+            if (!g_capture_wanted.load(std::memory_order_relaxed) || count == 0 || targets == nullptr || targets[0] == nullptr)
+            {
+                return;
+            }
+
+            ID3D11Resource* resource = nullptr;
+
+            targets[0]->GetResource(&resource);
+
+            if (resource == nullptr)
+            {
+                return;
+            }
+
+            ID3D11Texture2D* texture = nullptr;
+
+            if (SUCCEEDED(resource->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&texture))) && texture != nullptr)
+            {
+                D3D11_TEXTURE2D_DESC desc{};
+
+                texture->GetDesc(&desc);
+
+                std::scoped_lock lock(g_capture_mutex);
+
+                if (desc.Width == UINT(kCaptureWidth) && desc.Height == UINT(kCaptureHeight) && texture != g_capture_texture)
+                {
+                    if (g_capture_texture != nullptr)
+                    {
+                        g_capture_texture->Release();
+                    }
+
+                    g_capture_texture = texture;
+                    texture = nullptr;
+
+                    RC::Output::send<RC::LogLevel::Default>(
+                        STR("SBMP world: found the game's camera picture (format {})\n"),
+                        int(desc.Format)
+                    );
+                }
+
+                if (texture != nullptr)
+                {
+                    texture->Release();
+                }
+            }
+
+            resource->Release();
+        }
+
         void STDMETHODCALLTYPE set_targets_hook(
             ID3D11DeviceContext* context,
             UINT count,
@@ -713,6 +837,7 @@ float4 PSLight(float4 pos : SV_Position) : SV_Target {
         {
             g_original_set_targets(context, count, targets, depth);
             consider(depth);
+            consider_capture(count, targets);
         }
 
         void STDMETHODCALLTYPE set_targets_uav_hook(
@@ -728,6 +853,11 @@ float4 PSLight(float4 pos : SV_Position) : SV_Target {
         {
             g_original_set_targets_uav(context, count, targets, depth, uav_start, uav_count, uavs, uav_counts);
             consider(depth);
+
+            if (count != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL)
+            {
+                consider_capture(count, targets);
+            }
         }
 
         void patch_vtable(int index, void* target)
@@ -2350,6 +2480,52 @@ float4 PSLight(float4 pos : SV_Position) : SV_Target {
         // The game binds its depth buffer for writing again next frame.
         ID3D11ShaderResourceView* none = nullptr;
         context->PSSetShaderResources(1, 1, &none);
+    }
+
+    void set_capture_wanted(bool wanted)
+    {
+        g_capture_wanted.store(wanted, std::memory_order_relaxed);
+    }
+
+    ID3D11ShaderResourceView* capture_view(ID3D11Device* device)
+    {
+        std::scoped_lock lock(g_capture_mutex);
+
+        if (g_capture_texture == nullptr)
+        {
+            return nullptr;
+        }
+
+        if (g_capture_srv_of != g_capture_texture)
+        {
+            safe_release(g_capture_srv);
+            g_capture_srv_of = g_capture_texture;
+
+            D3D11_TEXTURE2D_DESC desc{};
+
+            g_capture_texture->GetDesc(&desc);
+
+            // The render target may be typeless: view it as the plain colour format.
+            D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+
+            view.Format = desc.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS ? DXGI_FORMAT_R8G8B8A8_UNORM
+                : desc.Format == DXGI_FORMAT_B8G8R8A8_TYPELESS ? DXGI_FORMAT_B8G8R8A8_UNORM
+                : desc.Format;
+            view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            view.Texture2D.MipLevels = 1;
+
+            if (FAILED(device->CreateShaderResourceView(g_capture_texture, &view, &g_capture_srv)))
+            {
+                g_capture_srv = nullptr;
+
+                RC::Output::send<RC::LogLevel::Default>(
+                    STR("SBMP world: the game's camera picture can't be shown (format {})\n"),
+                    int(desc.Format)
+                );
+            }
+        }
+
+        return g_capture_srv;
     }
 
     bool dug_at(int x, int y, int z)

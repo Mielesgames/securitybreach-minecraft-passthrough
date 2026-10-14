@@ -43,7 +43,7 @@ public final class DiscordPresence {
 
 	public static void start() {
 		if ("0".equals(APP_ID) || APP_ID.isBlank()) {
-			SkyCraft.LOG.info("SkyCraft: Discord Rich Presence off (no application id)");
+			SkyCraft.LOG.info("FNAFSBCraft: Discord Rich Presence off (no application id)");
 			return;
 		}
 		Thread thread = new Thread(DiscordPresence::run, "SkyCraft Discord");
@@ -56,7 +56,7 @@ public final class DiscordPresence {
 		String link = findLink(message);
 		if (link != null) {
 			hostLink = link;
-			SkyCraft.LOG.info("SkyCraft: this world is open to friends at {}", link);
+			SkyCraft.LOG.info("FNAFSBCraft: this world is open to friends at {}", link);
 		}
 	}
 
@@ -99,7 +99,7 @@ public final class DiscordPresence {
 			activity.add("timestamps", timestamps);
 			JsonObject assets = new JsonObject();
 			assets.addProperty("large_image", "skycraft");
-			assets.addProperty("large_text", "SkyCraft");
+			assets.addProperty("large_text", "FNAFSBCraft");
 			activity.add("assets", assets);
 			String joinable = hostLink != null ? hostLink : friend;
 			if (hostLink != null) {
@@ -157,12 +157,12 @@ public final class DiscordPresence {
 				readAvailable();
 				Thread.sleep(250);
 			} catch (IOException e) {
-				SkyCraft.LOG.info("SkyCraft: Discord connection closed ({}); retrying later", e.getMessage());
+				SkyCraft.LOG.info("FNAFSBCraft: Discord connection closed ({}); retrying later", e.getMessage());
 				close();
 			} catch (InterruptedException e) {
 				return;
 			} catch (RuntimeException e) {
-				SkyCraft.LOG.warn("SkyCraft: Discord Rich Presence error", e);
+				SkyCraft.LOG.warn("FNAFSBCraft: Discord Rich Presence error", e);
 				close();
 			}
 		}
@@ -186,7 +186,7 @@ public final class DiscordPresence {
 				JsonObject msg = readFrame();
 				if (msg != null && "READY".equals(str(msg, "evt"))) {
 					command("SUBSCRIBE", null, "ACTIVITY_JOIN");
-					SkyCraft.LOG.info("SkyCraft: connected to Discord (Rich Presence)");
+					SkyCraft.LOG.info("FNAFSBCraft: connected to Discord (Rich Presence)");
 					loggedNoDiscord = false;
 					sentActivity = null;
 					return true;
@@ -200,7 +200,7 @@ public final class DiscordPresence {
 		}
 		if (!loggedNoDiscord) {
 			loggedNoDiscord = true;
-			SkyCraft.LOG.info("SkyCraft: Discord isn't running; Rich Presence will connect when it is");
+			SkyCraft.LOG.info("FNAFSBCraft: Discord isn't running; Rich Presence will connect when it is");
 		}
 		return false;
 	}
@@ -224,11 +224,11 @@ public final class DiscordPresence {
 			if ("DISPATCH".equals(str(msg, "cmd")) && "ACTIVITY_JOIN".equals(str(msg, "evt")) && msg.has("data")) {
 				String secret = str(msg.getAsJsonObject("data"), "secret");
 				if (secret != null && E4MC_LINK.matcher(secret).matches()) {
-					SkyCraft.LOG.info("SkyCraft: joining {} from Discord", secret);
+					SkyCraft.LOG.info("FNAFSBCraft: joining {} from Discord", secret);
 					Minecraft.getInstance().execute(() -> MirrorWorld.joinFriend(Minecraft.getInstance(), secret));
 				}
 			} else if ("ERROR".equals(str(msg, "evt"))) {
-				SkyCraft.LOG.warn("SkyCraft: Discord says {}", msg.get("data"));
+				SkyCraft.LOG.warn("FNAFSBCraft: Discord says {}", msg.get("data"));
 			}
 		}
 	}

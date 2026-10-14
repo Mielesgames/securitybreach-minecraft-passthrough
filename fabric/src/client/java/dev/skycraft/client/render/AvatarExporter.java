@@ -157,7 +157,7 @@ final class AvatarExporter implements SubmitNodeCollector {
 			// At the origin: positions come out relative to the player's feet.
 			dispatcher.submit(state, cameraState, 0.0, 0.0, 0.0, new PoseStack(), this);
 		} catch (RuntimeException e) {
-			SkyCraft.LOG.warn("SkyCraft: couldn't capture the player model", e);
+			SkyCraft.LOG.warn("FNAFSBCraft: couldn't capture the player model", e);
 			return;
 		}
 		this.send(Proto.REN_AVATAR, null);
@@ -208,7 +208,7 @@ final class AvatarExporter implements SubmitNodeCollector {
 			CameraRenderState cameraState = minecraft.gameRenderer.gameRenderState().levelRenderState.cameraRenderState;
 			dispatcher.submit(state, cameraState, 0.0, 0.0, 0.0, new PoseStack(), this);
 		} catch (RuntimeException e) {
-			SkyCraft.LOG.warn("SkyCraft: couldn't capture the player's body for the ragdoll", e);
+			SkyCraft.LOG.warn("FNAFSBCraft: couldn't capture the player's body for the ragdoll", e);
 			return;
 		}
 		this.sendParts(Proto.REN_RAGDOLL);
@@ -296,6 +296,11 @@ final class AvatarExporter implements SubmitNodeCollector {
 		PoseStack pose = new PoseStack();
 		int entities = 0;
 		for (Entity e : level.entitiesForRendering()) {
+			// A host character's stand-in isn't drawn (the host draws the character), but what it
+			// wears on its head is: a carved pumpkin on Chica.
+			if (e instanceof SkyrimActorEntity proxy && e.distanceToSqr(cam) < SCENE_RANGE * SCENE_RANGE) {
+				this.submitHeadItem(minecraft, proxy, origin, partialTick);
+			}
 			if (e == player || e instanceof ItemEntity || e instanceof AbstractArrow || e instanceof ItemSupplier || e instanceof SkyrimActorEntity || dev.skycraft.combat.FreddyMount.isFreddy(e)
 				|| e.distanceToSqr(cam) > SCENE_RANGE * SCENE_RANGE || entities >= SCENE_MAX_ENTITIES) {
 				continue;
@@ -307,7 +312,7 @@ final class AvatarExporter implements SubmitNodeCollector {
 			} catch (RuntimeException ex) {
 				if (!warnedEntity) {
 					warnedEntity = true;
-					SkyCraft.LOG.warn("SkyCraft: couldn't capture {} for Skyrim", e, ex);
+					SkyCraft.LOG.warn("FNAFSBCraft: couldn't capture {} for Skyrim", e, ex);
 				}
 			}
 		}
@@ -322,7 +327,7 @@ final class AvatarExporter implements SubmitNodeCollector {
 				group.submit(this, cameraState);
 			}
 		} catch (RuntimeException ex) {
-			SkyCraft.LOG.warn("SkyCraft: couldn't capture particles for Skyrim", ex);
+			SkyCraft.LOG.warn("FNAFSBCraft: couldn't capture particles for Skyrim", ex);
 		}
 		this.capture.flush();
 		this.offX = this.offY = this.offZ = 0.0F;
@@ -372,7 +377,7 @@ final class AvatarExporter implements SubmitNodeCollector {
 					} catch (RuntimeException ex) {
 						if (!warnedBlockEntity) {
 							warnedBlockEntity = true;
-							SkyCraft.LOG.warn("SkyCraft: couldn't capture {} at {} for Skyrim", blockEntity.getType(), pos, ex);
+							SkyCraft.LOG.warn("FNAFSBCraft: couldn't capture {} at {} for Skyrim", blockEntity.getType(), pos, ex);
 						}
 					}
 				}
@@ -623,7 +628,7 @@ final class AvatarExporter implements SubmitNodeCollector {
 		NativeImage image = readTexture(texture);
 		if (image == null) {
 			UNUSABLE.add(texture);
-			SkyCraft.LOG.info("SkyCraft: texture {} isn't available to Skyrim; what uses it is left out", texture);
+			SkyCraft.LOG.info("FNAFSBCraft: texture {} isn't available to Skyrim; what uses it is left out", texture);
 			return -1;
 		}
 		int id = nextTextureId++;
@@ -644,7 +649,7 @@ final class AvatarExporter implements SubmitNodeCollector {
 			}
 		}
 		TEXTURE_IDS.put(texture, id);
-		SkyCraft.LOG.info("SkyCraft: sent texture {} to Skyrim (id {})", texture, id);
+		SkyCraft.LOG.info("FNAFSBCraft: sent texture {} to Skyrim (id {})", texture, id);
 		return id;
 	}
 
@@ -656,7 +661,7 @@ final class AvatarExporter implements SubmitNodeCollector {
 			try (var in = resource.get().open()) {
 				return NativeImage.read(in);
 			} catch (java.io.IOException e) {
-				SkyCraft.LOG.warn("SkyCraft: couldn't read {}", texture, e);
+				SkyCraft.LOG.warn("FNAFSBCraft: couldn't read {}", texture, e);
 				return null;
 			}
 		}
@@ -844,6 +849,37 @@ final class AvatarExporter implements SubmitNodeCollector {
 
 	@Override
 	public void submitFlame(PoseStack poseStack, EntityRenderState renderState, Quaternionf rotation) {
+	}
+
+	private final ItemStackRenderState headItem = new ItemStackRenderState();
+
+	/** The item on a host character's head, sized to the character, on top of it. */
+	private void submitHeadItem(Minecraft minecraft, SkyrimActorEntity proxy, double[] origin, float partialTick) {
+		var stack = proxy.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.HEAD);
+		if (stack.isEmpty()) {
+			return;
+		}
+		try {
+			// No display transform (HEAD's moves it for a Minecraft head, which this isn't): the
+			// model as it is, centred on the pose, sized to the character and placed by hand.
+			minecraft.getItemModelResolver().updateForLiving(this.headItem, stack, ItemDisplayContext.NONE, proxy);
+			double x = net.minecraft.util.Mth.lerp(partialTick, proxy.xo, proxy.getX());
+			double y = net.minecraft.util.Mth.lerp(partialTick, proxy.yo, proxy.getY());
+			double z = net.minecraft.util.Mth.lerp(partialTick, proxy.zo, proxy.getZ());
+			// About a head: three quarters of the body's width; its middle just under the top.
+			float size = Math.min(1.0F, Math.max(0.6F, proxy.getBbWidth() * 0.75F));
+			PoseStack pose = new PoseStack();
+			pose.translate(x - origin[0], y + proxy.getBbHeight() - size * 0.55 - origin[1], z - origin[2]);
+			pose.mulPose(new org.joml.Matrix4f().rotationY((float) Math.toRadians(180.0F - proxy.getYRot())));
+			pose.scale(size, size, size);
+			// Moderate light: the Pizzaplex is dark, a full-bright pumpkin would glow.
+			this.headItem.submit(pose, this, (9 << 4) | (9 << 20), OverlayTexture.NO_OVERLAY, 0);
+		} catch (RuntimeException ex) {
+			if (!warnedEntity) {
+				warnedEntity = true;
+				SkyCraft.LOG.warn("FNAFSBCraft: couldn't draw what {} wears", proxy.getName().getString(), ex);
+			}
+		}
 	}
 
 	/**

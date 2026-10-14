@@ -93,7 +93,7 @@ final class SkyAtlas {
 					}
 				}
 			} catch (java.io.IOException e) {
-				dev.skycraft.SkyCraft.LOG.warn("SkyCraft: couldn't read {}", id, e);
+				dev.skycraft.SkyCraft.LOG.warn("FNAFSBCraft: couldn't read {}", id, e);
 			}
 		}
 	}
@@ -119,7 +119,7 @@ final class SkyAtlas {
 					}
 				}
 			} catch (java.io.IOException e) {
-				dev.skycraft.SkyCraft.LOG.warn("SkyCraft: couldn't read {}", id, e);
+				dev.skycraft.SkyCraft.LOG.warn("FNAFSBCraft: couldn't read {}", id, e);
 			}
 		}
 	}

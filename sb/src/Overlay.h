@@ -26,6 +26,13 @@ namespace overlay
         std::atomic<bool> cursor_on{ false };
         std::atomic<int> cursor_x{ 0 };
         std::atomic<int> cursor_y{ 0 };
+        // A box in Minecraft's GUI pixels where a picture of the game is shown
+        // (Freddy in his mule screen): world::capture_view.
+        std::atomic<bool> preview_on{ false };
+        std::atomic<int> preview_x{ 0 };
+        std::atomic<int> preview_y{ 0 };
+        std::atomic<int> preview_w{ 0 };
+        std::atomic<int> preview_h{ 0 };
     };
 
     State& state();

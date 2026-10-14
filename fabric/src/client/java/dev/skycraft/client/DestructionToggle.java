@@ -48,7 +48,7 @@ public final class DestructionToggle {
 			SkyDig.destruction = !SkyDig.destruction;
 			b.setMessage(label());
 			save();
-			SkyCraft.LOG.info("SkyCraft: Skyrim destruction {}", SkyDig.destruction ? "on" : "off");
+			SkyCraft.LOG.info("FNAFSBCraft: Skyrim destruction {}", SkyDig.destruction ? "on" : "off");
 		}).bounds(4, 4, 150, 20).tooltip(Tooltip.create(Component.literal(host
 			? "Mining Skyrim's ground and rocks, and explosions, dig into Skyrim's world. Holes already dug stay either way."
 			: "In a friend's world, their setting decides."))).build();
@@ -67,7 +67,7 @@ public final class DestructionToggle {
 		} catch (NoSuchFileException e) {
 			return;
 		} catch (IOException e) {
-			SkyCraft.LOG.warn("SkyCraft: couldn't read {}", file(), e);
+			SkyCraft.LOG.warn("FNAFSBCraft: couldn't read {}", file(), e);
 			return;
 		}
 		SkyDig.destruction = !"false".equalsIgnoreCase(props.getProperty(KEY, "true").trim());
@@ -93,7 +93,7 @@ public final class DestructionToggle {
 			Files.createDirectories(file.getParent());
 			Files.write(file, lines);
 		} catch (IOException e) {
-			SkyCraft.LOG.warn("SkyCraft: couldn't save {}", file, e);
+			SkyCraft.LOG.warn("FNAFSBCraft: couldn't save {}", file, e);
 		}
 	}
 }

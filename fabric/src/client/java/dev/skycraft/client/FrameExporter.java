@@ -54,7 +54,7 @@ public final class FrameExporter {
 		}
 		if (!loggedFormat) {
 			loggedFormat = true;
-			SkyCraft.LOG.info("SkyCraft: overlay capture {}x{} format {}", width, height, color.getFormat());
+			SkyCraft.LOG.info("FNAFSBCraft: overlay capture {}x{} format {}", width, height, color.getFormat());
 		}
 
 		Staging slot = null;
