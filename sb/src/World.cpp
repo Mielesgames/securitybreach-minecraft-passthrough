@@ -169,13 +169,16 @@ bool InPit(float2 pixel, float d) {
 }
 // Walks a ray (Minecraft coordinates) through the pits it is in, from `p` on: where it leaves the
 // last one, by which face (axis 0 x, 1 y, 2 z), and how far it went inside them.
+static int g_lastPit = -1;
 float3 March(float3 p, float3 dir, out int axis, out float depth) {
     float3 inv = 1.0 / (abs(dir) < 1e-5 ? 1e-5 * sign(dir + 1e-6) : dir);
     axis = 1;
     depth = 0;
+    g_lastPit = -1;
     for (int step = 0; step < 8; ++step) {
         int k = PitAt(p);
         if (k < 0) break;
+        g_lastPit = k;
         float3 low = pits[k].xyz;
         float3 far = (dir > 0 ? low + 1 : low) - p;
         float3 t = far * inv;
@@ -189,7 +192,16 @@ float3 March(float3 p, float3 dir, out int axis, out float depth) {
 // The face a ray leaves a pit by looks like the ground under the Pizzaplex (deepslate tiles, like
 // the foundation blocks a hole gets), not like the void: 16 pixels a block, each a grey of its own,
 // with the tiles' seams darker. Minecraft's face shading on top; deeper is a little darker.
+// The ray left the pits downwards, out of one that opens into a room below: it is in that room.
+bool IntoRoom(int axis, float3 dir) {
+    return axis == 1 && dir.y < 0 && g_lastPit >= 0 && pits[g_lastPit].w > 0.5;
+}
 float4 PitWall(float3 p, float3 dir, int axis, float depth) {
+    // A hole through a thin floor: the room under it as depth, nearly black (the game never drew
+    // that part of the room: its floor was in front).
+    if (g_lastPit >= 0 && pits[g_lastPit].w > 0.5) {
+        return float4(float3(0.02, 0.018, 0.025) * exp(-depth * 0.5), 1);
+    }
     float2 uv = axis == 1 ? p.xz : (axis == 0 ? p.zy : p.xy);
     float2 px = floor(uv * 16.0);
     float noise = frac(sin(dot(px, float2(12.9898, 78.233))) * 43758.5453);
@@ -223,6 +235,8 @@ bool HiddenByGame(float2 pixel, float d, float viewZ, float surfaceZ) {
         float3 u = SurfaceAt(pixel, d);
         float3 m = float3(u.x, u.z, u.y) / 70.0;
         float3 p = March(m + dir * 0.01, dir, axis, depth);
+        // Through a hole into the room below: what is in that room shows.
+        if (IntoRoom(axis, dir)) return false;
         return viewZ > ViewZOf(p) + 1.5;
     }
     if (pits && PitAt(cam) >= 0) {
@@ -305,6 +319,8 @@ float4 PSLight(float4 pos : SV_Position) : SV_Target {
         // sections whose holes changed, for the collision to look again.
         std::unordered_map<std::uint64_t, std::array<std::uint64_t, 64>> g_dug;
         std::vector<std::array<int, 3>> g_dug_changed;
+        // Dug cells that open into a room below (same lock), packed like section_key.
+        std::vector<std::uint64_t> g_open_below;
 
         // Boxes of the blocks that aren't full cubes, per section (same lock), in blocks.
         std::unordered_map<std::uint64_t, std::vector<std::array<float, 6>>> g_shapes;
@@ -1982,7 +1998,7 @@ float4 PSLight(float4 pos : SV_Position) : SV_Target {
             }
 
             // The holes near the camera.
-            std::vector<std::pair<float, std::array<float, 3>>> holes;
+            std::vector<std::pair<float, std::array<float, 4>>> holes;
 
             {
                 const double cx = camera.position[0] / proto::kUnitsPerBlock;
@@ -2008,7 +2024,9 @@ float4 PSLight(float4 pos : SV_Position) : SV_Target {
                         const float by = float(sy * 16 + (bit >> 8));
                         const float dx = bx + 0.5f - float(cx), dy = by + 0.5f - float(cy), dz = bz + 0.5f - float(cz);
 
-                        holes.push_back({ dx * dx + dy * dy + dz * dz, { bx, by, bz } });
+                        const bool open = std::find(g_open_below.begin(), g_open_below.end(), section_key(int(bx), int(by), int(bz))) != g_open_below.end();
+
+                        holes.push_back({ dx * dx + dy * dy + dz * dz, { bx, by, bz, open ? 1.0f : 0.0f } });
                     }
                 }
             }
@@ -2066,6 +2084,7 @@ float4 PSLight(float4 pos : SV_Position) : SV_Target {
                 constants.pits[i][0] = holes[i].second[0];
                 constants.pits[i][1] = holes[i].second[1];
                 constants.pits[i][2] = holes[i].second[2];
+                constants.pits[i][3] = holes[i].second[3];
             }
 
             D3D11_MAPPED_SUBRESOURCE mapped{};
@@ -2549,6 +2568,42 @@ float4 PSLight(float4 pos : SV_Position) : SV_Target {
         std::scoped_lock lock(g_solids_mutex);
 
         return !g_dug.empty();
+    }
+
+    void dug_near(int x, int y, int z, int range, std::vector<std::array<int, 3>>& out)
+    {
+        std::scoped_lock lock(g_solids_mutex);
+
+        for (const auto& [key, bits] : g_dug)
+        {
+            const auto unpack = [](std::uint64_t v) { return int(std::int32_t(std::uint32_t(v << 11)) >> 11); };
+            const int sx = unpack(key >> 42), sy = unpack((key >> 21) & 0x1FFFFF), sz = unpack(key & 0x1FFFFF);
+
+            if (std::abs(sx * 16 + 8 - x) > range + 8 || std::abs(sy * 16 + 8 - y) > range + 8 || std::abs(sz * 16 + 8 - z) > range + 8)
+            {
+                continue;
+            }
+
+            for (int bit = 0; bit < 4096 && out.size() < 256; ++bit)
+            {
+                if (((bits[bit >> 6] >> (bit & 63)) & 1) != 0)
+                {
+                    out.push_back({ sx * 16 + (bit & 15), sy * 16 + (bit >> 8), sz * 16 + ((bit >> 4) & 15) });
+                }
+            }
+        }
+    }
+
+    void set_open_below(const std::vector<std::array<int, 3>>& open)
+    {
+        std::scoped_lock lock(g_solids_mutex);
+
+        g_open_below.clear();
+
+        for (const auto& cell : open)
+        {
+            g_open_below.push_back(section_key(cell[0], cell[1], cell[2]));
+        }
     }
 
     void take_dug_changes(std::vector<std::array<int, 3>>& out)

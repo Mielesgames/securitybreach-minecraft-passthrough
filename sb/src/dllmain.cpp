@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <array>
+#include <map>
 #include <exception>
 #include <fstream>
 #include <set>
@@ -119,6 +120,9 @@ static constexpr double kPreviewDistance = 420.0;
 static constexpr double kBlindSpeed = 220.0;
 // Something Minecraft carries that the game's walls held back this far is put where it should be.
 static constexpr double kCaptiveLeash = 700.0;
+// Minecraft blocks within this many blocks of Steve get a box in the game, at most this many.
+static constexpr int kBlockerRange = 10;
+static constexpr std::size_t kMaxBlockers = 600;
 // UE's MOVE_None: a character in a bucket doesn't move.
 static constexpr std::uint8_t kMoveNone = 0;
 // A lead Minecraft hasn't mentioned for this long is gone.
@@ -297,6 +301,17 @@ public:
     ULONGLONG shield_bash_tick = 0;
 
     bool holds_shears = false;
+
+    // Minecraft's blocks in the game's world: invisible boxes (TriggerBoxes
+    // made to block everything but pawns) for each run of solid blocks along
+    // x near Steve, so lasers, sight and the camera stop at them. Key: x of
+    // the run's first block, y, z, length. Plus one in front of a raised shield.
+    std::map<std::array<int, 4>, RC::Unreal::FWeakObjectPtr> blockers;
+    RC::Unreal::FWeakObjectPtr shield_blocker;
+    ULONGLONG blockers_tick = 0;
+    bool blockers_failed = false;
+    ULONGLONG open_below_tick = 0;
+    std::size_t open_below_count = 0;
 
     // Where the map is streamed in around while Steve is in a hole or the
     // air: his last place on the game's floor. Minecraft's flags of this tick.
@@ -1624,6 +1639,58 @@ public:
             update_achievements(controller);
         }
 
+        // Which holes near the player go through a thin floor into a room:
+        // a ray down from just under the hole meets the game's geometry only
+        // more than a block lower. Every 2 s.
+        if (first_person_character != nullptr && ::GetTickCount64() - open_below_tick > 2000 && world::any_dug())
+        {
+            open_below_tick = ::GetTickCount64();
+
+            const auto at = reinterpret_cast<RC::Unreal::AActor*>(first_person_character)->K2_GetActorLocation();
+            std::vector<std::array<int, 3>> cells;
+            std::vector<std::array<int, 3>> open;
+
+            world::dug_near(
+                static_cast<int>(std::floor(sb_to_mc_x(at.X()))),
+                static_cast<int>(std::floor(sb_to_mc_y(at.Z()))),
+                static_cast<int>(std::floor(sb_to_mc_z(at.Y()))),
+                24,
+                cells
+            );
+
+            for (const auto& cell : cells)
+            {
+                if (world::dug_at(cell[0], cell[1] - 1, cell[2]))
+                {
+                    continue;  // a deeper hole: its lowest cell decides
+                }
+
+                const double x = mc_to_sb_x(cell[0] + 0.5);
+                const double y = mc_to_sb_z(cell[2] + 0.5);
+                const double from[3] = { x, y, mc_to_sb_y(cell[1]) - 2.0 };
+                const double to[3] = { x, y, mc_to_sb_y(cell[1] - 16.0) };
+                double hit[3]{};
+
+                if (collision::trace(first_person_character, from, to, 0.0, nullptr, hit) != nullptr && from[2] - hit[2] > skycraft::proto::kUnitsPerBlock)
+                {
+                    open.push_back(cell);
+                }
+            }
+
+            if (open.size() != open_below_count)
+            {
+                open_below_count = open.size();
+
+                RC::Output::send<RC::LogLevel::Default>(
+                    STR("SBMP holes: {} of {} near Steve go through a thin floor into a room\n"),
+                    open.size(),
+                    cells.size()
+                );
+            }
+
+            world::set_open_below(open);
+        }
+
         // Inverted blocks placed or broken: the game's collision there changes.
         {
             std::vector<std::array<int, 3>> changed;
@@ -1652,6 +1719,7 @@ public:
             1.0f
         );
         update_noise(first_person_character, mc_state);
+        update_blockers(first_person_character, minecraft_mode && driving, minecraft_mode && driving && (mc_state.flags & skycraft::proto::kMcBlocking) != 0);
         update_wobbles();
 
         creative_mode = (mc_state.flags & skycraft::proto::kMcCreative) != 0;
@@ -3154,8 +3222,15 @@ public:
 
             if (object == nullptr || std::find(pawns.begin(), pawns.end(), object) == pawns.end())
             {
-                say_in_chat(it->name + L" left the game", true);
+                const auto name = it->name;
+
                 it = present.erase(it);
+
+                // Left when the last one of that name is gone (there are many Endos).
+                if (std::none_of(present.begin(), present.end(), [&name](const Present& p) { return p.name == name; }))
+                {
+                    say_in_chat(name + L" left the game", true);
+                }
             }
             else
             {
@@ -3182,7 +3257,8 @@ public:
                 continue;
             }
 
-            if (roster_taken)
+            // Joined when the first one of that name comes.
+            if (roster_taken && std::none_of(present.begin(), present.end(), [&name](const Present& p) { return p.name == name; }))
             {
                 say_in_chat(name + L" joined the game", true);
 
@@ -3342,6 +3418,232 @@ public:
                 STR("SBMP sight: {} more characters see {}% as far\n"),
                 pumpkin.newly,
                 static_cast<int>(sight * 100.0f)
+            );
+        }
+    }
+
+    // A box of the game's that blocks everything but characters: a TriggerBox
+    // (its box is its root) with the BlockAll profile, ignoring the Pawn
+    // channel. Hidden in game, as triggers are. Null if it couldn't be made.
+    auto make_blocker(RC::Unreal::UObject* context, const double centre[3], const double extent[3]) -> RC::Unreal::UObject*
+    {
+        static auto* box_class = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UObject*>(
+            nullptr, nullptr, STR("/Script/Engine.TriggerBox"));
+
+        if (box_class == nullptr)
+        {
+            return nullptr;
+        }
+
+        auto* actor = spawn_actor(context, box_class, centre);
+        auto* component = actor != nullptr ? actor->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("CollisionComponent")) : nullptr;
+
+        if (component == nullptr || *component == nullptr)
+        {
+            if (actor != nullptr)
+            {
+                call_with(actor, STR("K2_DestroyActor"), std::uint8_t{ 0 });
+            }
+
+            return nullptr;
+        }
+
+        auto* box = *component;
+
+        if (auto* size = box->GetFunctionByNameInChain(STR("SetBoxExtent")))
+        {
+            struct
+            {
+                float InBoxExtent[3];
+                bool bUpdateOverlaps;
+            } params{ { static_cast<float>(extent[0]), static_cast<float>(extent[1]), static_cast<float>(extent[2]) }, false };
+
+            box->ProcessEvent(size, &params);
+        }
+
+        if (auto* profile = box->GetFunctionByNameInChain(STR("SetCollisionProfileName")))
+        {
+            struct
+            {
+                RC::Unreal::FName InCollisionProfileName;
+                bool bUpdateOverlaps;
+            } params{ RC::Unreal::FName(STR("BlockAll"), RC::Unreal::FNAME_Add), false };
+
+            box->ProcessEvent(profile, &params);
+        }
+
+        // ECC_Pawn (2) -> ECR_Ignore (0): characters walk through (the mod
+        // pushes them out of blocks itself), and the mod's own collision
+        // scan (profile Pawn) doesn't see these as part of the game.
+        if (auto* response = box->GetFunctionByNameInChain(STR("SetCollisionResponseToChannel")))
+        {
+            struct
+            {
+                std::uint8_t Channel;
+                std::uint8_t NewResponse;
+            } params{ 2, 0 };
+
+            box->ProcessEvent(response, &params);
+        }
+
+        return actor;
+    }
+
+    auto update_blockers(RC::Unreal::UObject* player, bool active, bool shield) -> void
+    {
+        // The shield: every tick, in front of the camera, turned with it.
+        auto* shield_actor = shield_blocker.Get();
+
+        if (!shield || player == nullptr || !view.valid)
+        {
+            if (shield_actor != nullptr)
+            {
+                call_with(shield_actor, STR("K2_DestroyActor"), std::uint8_t{ 0 });
+                shield_blocker = RC::Unreal::FWeakObjectPtr{};
+            }
+        }
+        else
+        {
+            const double at[3] = {
+                view.position[0] + view.forward[0] * 45.0,
+                view.position[1] + view.forward[1] * 45.0,
+                view.position[2] + view.forward[2] * 45.0 - 20.0,
+            };
+
+            if (shield_actor == nullptr && !blockers_failed)
+            {
+                const double extent[3] = { 6.0, 40.0, 60.0 };
+
+                shield_actor = make_blocker(player, at, extent);
+                shield_blocker = shield_actor;
+            }
+
+            if (shield_actor != nullptr)
+            {
+                move_actor(reinterpret_cast<RC::Unreal::AActor*>(shield_actor), at[0], at[1], at[2]);
+                face(shield_actor, static_cast<float>(std::atan2(view.forward[1], view.forward[0]) * 180.0 / 3.14159265358979323846));
+            }
+        }
+
+        const ULONGLONG tick = ::GetTickCount64();
+
+        if (!active || player == nullptr)
+        {
+            if (!blockers.empty())
+            {
+                for (auto& [key, actor] : blockers)
+                {
+                    if (auto* a = actor.Get())
+                    {
+                        call_with(a, STR("K2_DestroyActor"), std::uint8_t{ 0 });
+                    }
+                }
+
+                blockers.clear();
+            }
+
+            return;
+        }
+
+        if (tick - blockers_tick < 500 || blockers_failed)
+        {
+            return;
+        }
+
+        blockers_tick = tick;
+
+        const auto here = reinterpret_cast<RC::Unreal::AActor*>(player)->K2_GetActorLocation();
+        const int cx = static_cast<int>(std::floor(here.X() / skycraft::proto::kUnitsPerBlock));
+        const int cy = static_cast<int>(std::floor(here.Z() / skycraft::proto::kUnitsPerBlock));
+        const int cz = static_cast<int>(std::floor(kZSign * here.Y() / skycraft::proto::kUnitsPerBlock));
+
+        // Runs of solid blocks along x.
+        std::map<std::array<int, 4>, bool> wanted;
+
+        for (int y = cy - kBlockerRange; y <= cy + kBlockerRange; ++y)
+        {
+            for (int z = cz - kBlockerRange; z <= cz + kBlockerRange; ++z)
+            {
+                int start = 0;
+                int length = 0;
+
+                for (int x = cx - kBlockerRange; x <= cx + kBlockerRange + 1; ++x)
+                {
+                    const bool solid = x <= cx + kBlockerRange && world::solid_at(x, y, z);
+
+                    if (solid)
+                    {
+                        if (length == 0)
+                        {
+                            start = x;
+                        }
+
+                        ++length;
+                    }
+                    else if (length > 0)
+                    {
+                        wanted[{ start, y, z, length }] = true;
+                        length = 0;
+                    }
+                }
+            }
+        }
+
+        // Gone: their boxes go.
+        for (auto it = blockers.begin(); it != blockers.end();)
+        {
+            if (wanted.count(it->first) == 0 || it->second.Get() == nullptr)
+            {
+                if (auto* a = it->second.Get())
+                {
+                    call_with(a, STR("K2_DestroyActor"), std::uint8_t{ 0 });
+                }
+
+                it = blockers.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+
+        int made = 0;
+
+        for (const auto& [key, unused] : wanted)
+        {
+            if (blockers.count(key) != 0 || blockers.size() >= kMaxBlockers)
+            {
+                continue;
+            }
+
+            const double centre[3] = {
+                mc_to_sb_x(key[0] + key[3] * 0.5),
+                mc_to_sb_z(key[2] + 0.5),
+                mc_to_sb_y(key[1] + 0.5),
+            };
+            const double half = skycraft::proto::kUnitsPerBlock * 0.5 - 0.5;
+            const double extent[3] = { half + (key[3] - 1) * skycraft::proto::kUnitsPerBlock * 0.5, half, half };
+
+            auto* actor = make_blocker(player, centre, extent);
+
+            if (actor == nullptr)
+            {
+                blockers_failed = true;
+
+                RC::Output::send<RC::LogLevel::Default>(STR("SBMP blockers: couldn't make a box in the game, lasers pass through blocks\n"));
+                return;
+            }
+
+            blockers[key] = actor;
+            ++made;
+        }
+
+        if (made != 0)
+        {
+            RC::Output::send<RC::LogLevel::Verbose>(
+                STR("SBMP blockers: {} boxes for Minecraft's blocks near Steve ({} new)\n"),
+                blockers.size(),
+                made
             );
         }
     }
@@ -3784,6 +4086,7 @@ public:
         };
 
         RC::Unreal::UObject* chosen = nullptr;
+        std::vector<RC::Unreal::UObject*> zone_rooms;
         std::wstring known;
 
         for (auto* room : rooms)
@@ -3809,9 +4112,15 @@ public:
 
             for (const auto* word : kZones[zone])
             {
-                if (chosen == nullptr && where.find(word) != std::wstring::npos)
+                if (where.find(word) != std::wstring::npos)
                 {
-                    chosen = room;
+                    if (chosen == nullptr)
+                    {
+                        chosen = room;
+                    }
+
+                    zone_rooms.push_back(room);
+                    break;
                 }
             }
         }
@@ -3828,18 +4137,127 @@ public:
             return;
         }
 
-        float spot[3]{};
+        // Where Gregory can stand: a save station in one of the zone's rooms if
+        // there is one (in front of it), else the rooms' entrances, their
+        // points of interest, and places in them. Each is checked: a floor
+        // under it (a ray straight down) and room for Gregory above that.
+        std::vector<std::array<double, 3>> candidates;
 
-        if (!call_getter(chosen, STR("GetRandomLocationInRoom"), spot) || (spot[0] == 0.0f && spot[1] == 0.0f && spot[2] == 0.0f))
         {
-            const auto at = reinterpret_cast<RC::Unreal::AActor*>(chosen)->K2_GetActorLocation();
+            std::vector<RC::Unreal::UObject*> stations;
 
-            spot[0] = at.X();
-            spot[1] = at.Y();
-            spot[2] = at.Z();
+            RC::Unreal::UObjectGlobals::FindAllOf(STR("PowerStation_Actor"), stations);
+
+            for (auto* station : stations)
+            {
+                if (station == nullptr)
+                {
+                    continue;
+                }
+
+                const auto at = reinterpret_cast<RC::Unreal::AActor*>(station)->K2_GetActorLocation();
+
+                for (auto* room : zone_rooms)
+                {
+                    struct
+                    {
+                        float Location[3];
+                        bool ReturnValue;
+                    } inside{ { at.X(), at.Y(), at.Z() }, false };
+
+                    if (auto* test = room->GetFunctionByNameInChain(STR("IsLocationInRoom")))
+                    {
+                        room->ProcessEvent(test, &inside);
+                    }
+
+                    if (inside.ReturnValue)
+                    {
+                        float forward[3]{ 1.0f, 0.0f, 0.0f };
+
+                        call_getter(station, STR("GetActorForwardVector"), forward);
+                        candidates.push_back({ at.X() + forward[0] * 130.0, at.Y() + forward[1] * 130.0, at.Z() });
+                        candidates.push_back({ at.X() - forward[0] * 130.0, at.Y() - forward[1] * 130.0, at.Z() });
+                        break;
+                    }
+                }
+            }
         }
 
-        move_actor(reinterpret_cast<RC::Unreal::AActor*>(player), spot[0], spot[1], spot[2] + capsule_half_height(player) + 20.0);
+        for (auto* room : zone_rooms)
+        {
+            // TArray<FVector> GetPointsOfInterest(): a pointer and a count.
+            struct
+            {
+                const float* data;
+                std::int32_t count;
+                std::int32_t room;
+            } points{};
+
+            if (call_getter(room, STR("GetPointsOfInterest"), points) && points.data != nullptr && points.count > 0 && points.count < 256)
+            {
+                for (std::int32_t i = 0; i < points.count && i < 8; ++i)
+                {
+                    candidates.push_back({ points.data[i * 3], points.data[i * 3 + 1], points.data[i * 3 + 2] });
+                }
+            }
+
+            for (int i = 0; i < 6; ++i)
+            {
+                float random[3]{};
+
+                if (call_getter(room, STR("GetRandomLocationInRoom"), random) && (random[0] != 0.0f || random[1] != 0.0f || random[2] != 0.0f))
+                {
+                    candidates.push_back({ random[0], random[1], random[2] });
+                }
+            }
+        }
+
+        const double half = capsule_half_height(player);
+        double spot[3]{};
+        bool found = false;
+
+        for (const auto& candidate : candidates)
+        {
+            // The floor: a ray down from a little above to well below.
+            const double from[3] = { candidate[0], candidate[1], candidate[2] + 150.0 };
+            const double to[3] = { candidate[0], candidate[1], candidate[2] - 600.0 };
+            double floor[3]{};
+
+            if (collision::trace(player, from, to, 0.0, nullptr, floor) == nullptr)
+            {
+                continue;
+            }
+
+            // Room to stand: nothing in a body-sized sweep from just above the floor up.
+            const double feet[3] = { floor[0], floor[1], floor[2] + 15.0 };
+            const double head[3] = { floor[0], floor[1], floor[2] + half * 2.0 };
+
+            if (collision::trace(player, feet, head, 25.0) != nullptr)
+            {
+                continue;
+            }
+
+            spot[0] = floor[0];
+            spot[1] = floor[1];
+            spot[2] = floor[2];
+            found = true;
+            break;
+        }
+
+        if (!found)
+        {
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP tp: zone {} has rooms ({}), but none of {} places in them has a floor with room to stand<bs>n"),
+                zone,
+                zone_rooms.size(),
+                candidates.size()
+            );
+
+            say_in_chat(L"No safe place to stand found there right now.", false);
+            return;
+        }
+
+        move_actor(reinterpret_cast<RC::Unreal::AActor*>(player), spot[0], spot[1], spot[2] + half + 5.0);
         stream_safe = false;
 
         RC::Output::send<RC::LogLevel::Default>(
@@ -4900,6 +5318,18 @@ public:
             }
 
             const auto who = source != nullptr ? text_of(*source) : std::wstring{};
+            // The game often starts the line with the speaker's name itself
+            // ("Chica: Employees only."): once is enough.
+            if (!who.empty() && plain.size() > who.size() + 1 && lower(plain.substr(0, who.size())) == lower(who) && plain[who.size()] == L':')
+            {
+                plain.erase(0, who.size() + 1);
+
+                while (!plain.empty() && plain.front() == L' ')
+                {
+                    plain.erase(0, 1);
+                }
+            }
+
             const std::wstring message = (who.empty() ? L"" : L"<" + who + L"> ") + plain;
 
             RC::Output::send<RC::LogLevel::Default>(

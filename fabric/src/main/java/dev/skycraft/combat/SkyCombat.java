@@ -418,6 +418,17 @@ public final class SkyCombat {
 		}
 		int effects = (proxy.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.HEAD).is(net.minecraft.world.item.Items.CARVED_PUMPKIN) ? 1 : 0)
 			| (slippery(proxy.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.FEET)) ? 2 : 0);
+		// On ice it has no grip: a player walking into it shoves it along.
+		if ((effects & 2) != 0) {
+			for (var player : level.getEntitiesOfClass(net.minecraft.world.entity.player.Player.class, proxy.getBoundingBox().inflate(0.35, 0.0, 0.35),
+				p -> !p.isSpectator())) {
+				double dx = proxy.getX() - player.getX(), dz = proxy.getZ() - player.getZ();
+				double far = Math.sqrt(dx * dx + dz * dz);
+				if (far > 1.0E-3) {
+					SkyLink.pushEvent(Proto.EV_ACTOR_PUSH, id, (float) (dx / far * 0.35), 0, (float) (dz / far * 0.35), 0, 0);
+				}
+			}
+		}
 		Integer hadEffects = BLIND.put(id, effects);
 		if ((hadEffects == null ? effects != 0 : hadEffects != effects) || (effects != 0 && now % 40 == 0)) {
 			SkyLink.pushEvent(Proto.EV_ACTOR_BLIND, id, 0, 0, 0, 0, effects);

@@ -82,6 +82,12 @@ namespace world
     // last call, so the collision there can be felt out again. Game thread.
     void take_dug_changes(std::vector<std::array<int, 3>>& out);
 
+    // Holes through a thin floor into a room below (drawn as depth, not as a
+    // stone pit; what is in the room shows through). Game thread, from time
+    // to time: the dug cells near the player, and which of those are open.
+    void dug_near(int x, int y, int z, int range, std::vector<std::array<int, 3>>& out);
+    void set_open_below(const std::vector<std::array<int, 3>>& open);
+
     // The game's own camera picture of something (a SceneCapture2D drawing
     // into a render target of exactly kCaptureWidth x kCaptureHeight, which
     // nothing else uses): looked for while wanted, given to the overlay.

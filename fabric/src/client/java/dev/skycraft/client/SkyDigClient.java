@@ -63,6 +63,10 @@ public final class SkyDigClient {
 	 * as mining the block it's made of would take. Returns true if it's being mined.
 	 */
 	public static boolean attack(Minecraft minecraft) {
+		if (SkyDig.PASSTHROUGH && !(minecraft.hitResult instanceof SkyClip.SkyrimHitResult) && minecraft.level != null && minecraft.player != null
+			&& minecraft.gameMode != null && (minecraft.hitResult == null || minecraft.hitResult.getType() == net.minecraft.world.phys.HitResult.Type.MISS)) {
+			return attackHoleWall(minecraft);
+		}
 		if (!(minecraft.hitResult instanceof SkyClip.SkyrimHitResult result) || minecraft.level == null || minecraft.player == null || minecraft.gameMode == null) {
 			return false;
 		}
@@ -119,6 +123,55 @@ public final class SkyDigClient {
 			if (!passthrough) {
 				REVEAL.put(pos.asLong(), REVEAL_TRIES); // what's around it: blocks, or walls
 			}
+			mining = null;
+			progress = 0.0F;
+		}
+		return true;
+	}
+
+	/**
+	 * Security Breach: the sides of a hole under the game's floor are only collision (SkyDig.wallShape),
+	 * nothing a crosshair can point at. Looking at nothing, the first such cell along the look within
+	 * reach is mined like the game's surfaces are (with a pickaxe or shovel, as hard as deepslate).
+	 */
+	private static boolean attackHoleWall(Minecraft minecraft) {
+		var player = minecraft.player;
+		var tool = player.getMainHandItem();
+		if (!(tool.is(net.minecraft.tags.ItemTags.PICKAXES) || tool.is(net.minecraft.tags.ItemTags.SHOVELS))) {
+			return false;
+		}
+		net.minecraft.world.phys.Vec3 eye = player.getEyePosition();
+		net.minecraft.world.phys.Vec3 look = player.getLookAngle();
+		BlockPos pos = null;
+		for (double t = 0.2; t <= player.blockInteractionRange(); t += 0.1) {
+			BlockPos cell = BlockPos.containing(eye.add(look.scale(t)));
+			if (minecraft.level.getBlockState(cell).isAir() && SkyDig.wallShape(minecraft.level, cell) != null && !SkyDig.isDug(minecraft.level, world(), cell)) {
+				pos = cell;
+				break;
+			}
+		}
+		if (pos == null) {
+			return false;
+		}
+		if (pos.equals(mining) && miningTick == ticks) {
+			return true;
+		}
+		if (!pos.equals(mining) || ticks - miningTick > 2) {
+			mining = pos;
+			progress = 0.0F;
+			hits = 0;
+		}
+		miningTick = ticks;
+		BlockState state = net.minecraft.world.level.block.Blocks.DEEPSLATE.defaultBlockState();
+		progress += player.getAbilities().instabuild ? 1.0F : state.getDestroyProgress(player, minecraft.level, pos);
+		if (hits++ % 4 == 0) {
+			var sound = state.getSoundType();
+			minecraft.getSoundManager().play(new SimpleSoundInstance(
+				sound.getHitSound(), SoundSource.BLOCKS, (sound.getVolume() + 1.0F) / 8.0F, sound.getPitch() * 0.5F, SoundInstance.createUnseededRandom(), pos
+			));
+		}
+		if (progress >= 1.0F) {
+			ClientPlayNetworking.send(new SkyNet.DigOpen(world(), pos, DIG_STONE));
 			mining = null;
 			progress = 0.0F;
 		}

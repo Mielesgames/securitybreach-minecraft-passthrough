@@ -224,7 +224,27 @@ public final class SkyDig {
 	 * Breaking a foundation block does the same one level down. (The cells beside the hole, under the
 	 * floor there, get an invisible wall that only collides: see wallShape.)
 	 */
+	/**
+	 * A hole through a thin floor with a room under it (a catwalk, a grating, a balcony): nothing of
+	 * the game's right under the cell, but the game's geometry again further down. It is a real hole
+	 * then: no foundation, no walls under the floor around it, and the player falls through.
+	 */
+	public static boolean openBelow(BlockPos pos) {
+		if (SkyCollision.hasGeometry(pos.below())) {
+			return false;
+		}
+		for (int k = 2; k <= 16; k++) {
+			if (SkyCollision.hasGeometry(pos.below(k))) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	public static void underground(ServerLevel level, BlockPos pos) {
+		if (openBelow(pos)) {
+			return;
+		}
 		BlockPos below = pos.below();
 		// Only where nothing of the game's is under the hole: a hole in a wall stands on the game's
 		// floor, and a block there would stick up out of it.
@@ -817,7 +837,8 @@ public final class SkyDig {
 			}
 			// Under the game's floor (it runs a block or two above): nothing is there, so a whole wall.
 			// Open air beside a hole (no floor above it) stays open.
-			if (SkyCollision.hasGeometry(pos.above()) || SkyCollision.hasGeometry(pos.above(2))) {
+			// (Not under a thin floor with a room below: that space is the room, open.)
+			if ((SkyCollision.hasGeometry(pos.above()) || SkyCollision.hasGeometry(pos.above(2))) && !openBelow(pos.above())) {
 				return Shapes.block();
 			}
 			return null;
