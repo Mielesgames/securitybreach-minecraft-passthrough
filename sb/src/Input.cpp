@@ -150,10 +150,16 @@ namespace input
                     return false;
                 }
 
-                // Outside a Minecraft screen Escape is the game's pause menu.
+                // Outside a Minecraft screen Escape opens the pause menu, in
+                // Minecraft's style (its "Game Options" button opens the game's own).
                 if (!g_screen_open && wparam == VK_ESCAPE)
                 {
-                    return false;
+                    if (down && !repeat)
+                    {
+                        g_link->push_input(skycraft::proto::kInOpenMenu, 0);
+                    }
+
+                    return true;
                 }
 
                 // Held keys only repeat where it matters: typing in a screen.

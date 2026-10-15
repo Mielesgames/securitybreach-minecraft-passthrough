@@ -23,6 +23,9 @@ public abstract class IronGolemMixin extends AbstractGolem {
 
 	@Inject(method = "registerGoals", at = @At("TAIL"))
 	private void skycraft$huntHostActors(CallbackInfo ci) {
-		this.targetSelector.addGoal(3, new NearestAttackableTargetGoal<>(this, SkyrimActorEntity.class, true));
+		// Not Freddy: he is the player's friend. And not only what it can see (the host's walls
+		// aren't blocks, so sight is unreliable here).
+		this.targetSelector.addGoal(3, new NearestAttackableTargetGoal<>(this, SkyrimActorEntity.class, 10, false, false,
+			(target, level) -> !target.getName().getString().toLowerCase(java.util.Locale.ROOT).contains("freddy")));
 	}
 }

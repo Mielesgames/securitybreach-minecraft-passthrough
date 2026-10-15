@@ -20,12 +20,13 @@ public final class SkyCraft implements ModInitializer {
 	private static final String KIT2_TAG = "skycraft_builder_kit";
 	private static final String KIT3_TAG = "skycraft_pizzaplex_kit";
 	private static final String KIT4_TAG = "skycraft_iron_pickaxe";
+	private static final String GUIDE_TAG = "skycraft_guide";
 
 	/** Security Breach: Steve may open (and redstone may open) the game's doors. */
 	public static final net.minecraft.world.level.gamerules.GameRule<Boolean> ALLOW_OPENING_DOORS =
 		net.fabricmc.fabric.api.gamerule.v1.GameRuleBuilder.forBoolean(true)
 			.category(net.minecraft.world.level.gamerules.GameRuleCategory.PLAYER)
-			.buildAndRegister(net.minecraft.resources.Identifier.fromNamespaceAndPath("skycraft", "allow_opening_doors"));
+			.buildAndRegister(net.minecraft.resources.Identifier.withDefaultNamespace("allow_opening_doors"));
 
 	/** Security Breach: a hole in the host's world (see InvertedBlock). */
 	public static final net.minecraft.resources.ResourceKey<net.minecraft.world.level.block.Block> INVERTED_BLOCK_KEY = net.minecraft.resources.ResourceKey.create(
@@ -47,11 +48,37 @@ public final class SkyCraft implements ModInitializer {
 		net.minecraft.core.registries.BuiltInRegistries.ITEM, VOID_FILLER_KEY,
 		new net.minecraft.world.item.Item(new net.minecraft.world.item.Item.Properties().setId(VOID_FILLER_KEY).stacksTo(1)));
 
+	/**
+	 * Security Breach: experimental features (still buggy). Off by default, saved with the world:
+	 * "/experiment enable" or "/experiment disable". Now: mining the game's floors and walls.
+	 */
+	public static final net.minecraft.world.level.gamerules.GameRule<Boolean> EXPERIMENTS =
+		net.fabricmc.fabric.api.gamerule.v1.GameRuleBuilder.forBoolean(false)
+			.category(net.minecraft.world.level.gamerules.GameRuleCategory.PLAYER)
+			.buildAndRegister(net.minecraft.resources.Identifier.withDefaultNamespace("experiment_block_breaking"));
+
+	/** Whether the experimental features are on (in this server's world). */
+	public static boolean experiments(net.minecraft.server.MinecraftServer server) {
+		return server != null && server.overworld().getGameRules().get(EXPERIMENTS);
+	}
+
+	/**
+	 * Security Breach: Steve may use what the game says can't be used right now (a button that is
+	 * switched off, a station that isn't ready). Off by default.
+	 */
+	public static final net.minecraft.world.level.gamerules.GameRule<Boolean> ALLOW_CHEATING =
+		net.fabricmc.fabric.api.gamerule.v1.GameRuleBuilder.forBoolean(false)
+			.category(net.minecraft.world.level.gamerules.GameRuleCategory.PLAYER)
+			.buildAndRegister(net.minecraft.resources.Identifier.withDefaultNamespace("allow_cheating"));
+
+	/** Set by the end portal (server thread); the client opens the ending when it sees it. */
+	public static volatile boolean endingRequested;
+
 	/** Security Breach: a water bucket scoops up an animatronic, like a fish. */
 	public static final net.minecraft.world.level.gamerules.GameRule<Boolean> ALLOW_ANIMATRONIC_WATER_BUCKET =
 		net.fabricmc.fabric.api.gamerule.v1.GameRuleBuilder.forBoolean(true)
 			.category(net.minecraft.world.level.gamerules.GameRuleCategory.PLAYER)
-			.buildAndRegister(net.minecraft.resources.Identifier.fromNamespaceAndPath("skycraft", "allow_animatronic_water_bucket"));
+			.buildAndRegister(net.minecraft.resources.Identifier.withDefaultNamespace("allow_animatronic_water_bucket"));
 
 	/** The bucket a scooped-up Security Breach character is in: its name, and the host's number for it. */
 	public static net.minecraft.world.item.ItemStack tokenBucket(int id, String name) {
@@ -63,6 +90,20 @@ public final class SkyCraft implements ModInitializer {
 		tag.putInt(TOKEN_KEY, id);
 		bucket.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.of(tag));
 		return bucket;
+	}
+
+	/** Awards one of the mod's own advancements (data/skycraft/advancement/tricks) to every player. */
+	public static void award(net.minecraft.server.MinecraftServer server, String trick) {
+		if (server == null) {
+			return;
+		}
+		var advancement = server.getAdvancements().get(net.minecraft.resources.Identifier.fromNamespaceAndPath(MOD_ID, "tricks/" + trick));
+		if (advancement == null) {
+			return;
+		}
+		for (var player : server.getPlayerList().getPlayers()) {
+			player.getAdvancements().award(advancement, "done");
+		}
 	}
 
 	/** The Pizzaplex's areas for /tp, in the order the host knows them (sb's kZones). */
@@ -190,6 +231,8 @@ public final class SkyCraft implements ModInitializer {
 	@Override
 	public void onInitialize() {
 		SkyCombat.init();
+		// Registered before any player loads (it is kept in the player's data).
+		LOG.info("FNAFSBCraft: Freddy's chest kept as {}", dev.skycraft.combat.FreddyMount.CHEST.identifier());
 		// (The inverted block stays registered for worlds that have one; holes are mined now.)
 		net.fabricmc.fabric.api.creativetab.v1.CreativeModeTabEvents.modifyOutputEvent(net.minecraft.world.item.CreativeModeTabs.TOOLS_AND_UTILITIES)
 			.register(output -> output.accept(VOID_FILLER));
@@ -272,6 +315,7 @@ public final class SkyCraft implements ModInitializer {
 			}
 			return net.minecraft.world.InteractionResult.SUCCESS;
 		});
+		SkyFrames.init();
 		dev.skycraft.net.SkyNet.init();
 		dev.skycraft.world.SkyDig.init();
 		// Commands for the host game (Security Breach): "/freddy" or "/tp freddy" brings that
@@ -293,6 +337,20 @@ public final class SkyCraft implements ModInitializer {
 						return 1;
 					})));
 			}
+			// /experiment enable|disable: the buggy features, saved with the world.
+			hideGameRules(dispatcher);
+			// "/experiment enable block_breaking": each experiment by name (completed by the chat).
+			dispatcher.register(net.minecraft.commands.Commands.literal("experiment")
+				.executes(context -> {
+					boolean on = experiments(context.getSource().getServer());
+					context.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.literal(
+						"Experiments: block_breaking (mining the Pizzaplex's floors and walls) is " + (on ? "enabled" : "disabled") + "."), false);
+					return on ? 1 : 0;
+				})
+				.then(net.minecraft.commands.Commands.literal("enable")
+					.then(net.minecraft.commands.Commands.literal("block_breaking").executes(context -> setExperiments(context.getSource(), true))))
+				.then(net.minecraft.commands.Commands.literal("disable")
+					.then(net.minecraft.commands.Commands.literal("block_breaking").executes(context -> setExperiments(context.getSource(), false)))));
 			// /repairworld: every hole in Security Breach near the players closed again.
 			dispatcher.register(net.minecraft.commands.Commands.literal("repairworld").executes(context -> {
 				var level = context.getSource().getLevel();
@@ -347,14 +405,68 @@ public final class SkyCraft implements ModInitializer {
 			if (handler.getPlayer().getInventory().isEmpty()) {
 				handler.getPlayer().removeTag(KIT2_TAG);
 				handler.getPlayer().removeTag(KIT3_TAG);
+				handler.getPlayer().removeTag(GUIDE_TAG);
 				LOG.info("FNAFSBCraft: {} spawned with nothing, the kits are given again", handler.getPlayer().getName().getString());
 			}
 			giveStarterKit(handler.getPlayer());
 			giveBuilderKit(handler.getPlayer());
 			givePizzaplexKit(handler.getPlayer());
+			// Once per player, also in worlds from before: the guide (first: trapdoors for the vents).
+			if (dev.skycraft.world.SkyDig.PASSTHROUGH && !handler.getPlayer().entityTags().contains(GUIDE_TAG)) {
+				handler.getPlayer().getInventory().add(SkyLoot.guide());
+				handler.getPlayer().addTag(GUIDE_TAG);
+				LOG.info("FNAFSBCraft: gave {} the guide", handler.getPlayer().getName().getString());
+			}
 			server.execute(() -> fixPizzaplexKit(joined));
 			dressTestGuest(handler.getPlayer());
 		});
+	}
+
+	/**
+	 * Minecraft's game rules that do nothing in the Pizzaplex (the mod sets them itself, or what they
+	 * govern doesn't happen here) are left out of /gamerule and its completion. They still exist.
+	 */
+	private static final java.util.Set<String> HIDDEN_RULES = java.util.Set.of(
+		"advance_time", "advance_weather", "allow_entering_nether_using_portals", "players_nether_portal_creative_delay",
+		"players_nether_portal_default_delay", "spawn_patrols", "spawn_phantoms", "spawn_wandering_traders", "spawn_wardens",
+		"spawn_mobs", "spawn_monsters", "raids", "players_sleeping_percentage", "immediate_respawn", "player_movement_check",
+		"elytra_movement_check", "spectators_generate_chunks", "locator_bar", "max_snow_accumulation_height", "show_advancement_messages",
+		"forgive_dead_players", "universal_anger", "spread_vines");
+
+	private static void hideGameRules(com.mojang.brigadier.CommandDispatcher<net.minecraft.commands.CommandSourceStack> dispatcher) {
+		if (!dev.skycraft.world.SkyDig.PASSTHROUGH) {
+			return;
+		}
+		var gamerule = dispatcher.getRoot().getChild("gamerule");
+		if (gamerule == null) {
+			return;
+		}
+		int hidden = 0;
+		try {
+			for (String field : new String[] { "children", "literals", "arguments" }) {
+				var f = com.mojang.brigadier.tree.CommandNode.class.getDeclaredField(field);
+				f.setAccessible(true);
+				var map = (java.util.Map<?, ?>) f.get(gamerule);
+				int before = map.size();
+				map.keySet().removeIf(key -> HIDDEN_RULES.contains(key.toString()));
+				if (field.equals("children")) {
+					hidden = before - map.size();
+				}
+			}
+		} catch (ReflectiveOperationException | RuntimeException e) {
+			LOG.warn("FNAFSBCraft: couldn't hide game rules", e);
+			return;
+		}
+		LOG.info("FNAFSBCraft: {} of Minecraft's game rules hidden from /gamerule", hidden);
+	}
+
+	private static int setExperiments(net.minecraft.commands.CommandSourceStack source, boolean on) {
+		var server = source.getServer();
+		server.overworld().getGameRules().set(EXPERIMENTS, on, server);
+		LOG.info("FNAFSBCraft: experimental features {}", on ? "on" : "off");
+		source.sendSuccess(() -> net.minecraft.network.chat.Component.literal(
+			"Experiment block_breaking " + (on ? "enabled" : "disabled") + " (mining the Pizzaplex's floors and walls). This is saved with the world."), false);
+		return 1;
 	}
 
 	/**

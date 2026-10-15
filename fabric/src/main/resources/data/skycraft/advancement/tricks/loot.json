@@ -1,0 +1,19 @@
+{
+  "criteria": {
+    "done": {
+      "trigger": "minecraft:impossible"
+    }
+  },
+  "display": {
+    "title": "Lost and Found... Again",
+    "description": "Find a chest in a room of the Pizzaplex",
+    "icon": {
+      "id": "minecraft:chest"
+    },
+    "frame": "task",
+    "show_toast": true,
+    "announce_to_chat": true,
+    "hidden": false
+  },
+  "parent": "skycraft:tricks/root"
+}

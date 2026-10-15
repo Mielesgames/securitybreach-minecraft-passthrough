@@ -125,6 +125,23 @@ public final class SkyCollision {
 	}
 
 	/** True once Skyrim has sent the region containing this block (even if it was empty). */
+	/** True if every region the box touches has come from the host (its geometry is known). */
+	public static boolean isKnown(net.minecraft.world.phys.AABB box) {
+		int rx0 = Math.floorDiv((int) Math.floor(box.minX), REGION_SIZE), rx1 = Math.floorDiv((int) Math.floor(box.maxX), REGION_SIZE);
+		int ry0 = Math.floorDiv((int) Math.floor(box.minY), REGION_SIZE), ry1 = Math.floorDiv((int) Math.floor(box.maxY), REGION_SIZE);
+		int rz0 = Math.floorDiv((int) Math.floor(box.minZ), REGION_SIZE), rz1 = Math.floorDiv((int) Math.floor(box.maxZ), REGION_SIZE);
+		for (int rx = rx0; rx <= rx1; rx++) {
+			for (int ry = ry0; ry <= ry1; ry++) {
+				for (int rz = rz0; rz <= rz1; rz++) {
+					if (!KNOWN_REGIONS.contains(regionKey(rx, ry, rz))) {
+						return false;
+					}
+				}
+			}
+		}
+		return true;
+	}
+
 	public static boolean isKnown(int x, int y, int z) {
 		return KNOWN_REGIONS.contains(regionKey(Math.floorDiv(x, REGION_SIZE), Math.floorDiv(y, REGION_SIZE), Math.floorDiv(z, REGION_SIZE)));
 	}

@@ -56,6 +56,9 @@ public final class Proto {
 	public static final int IN_ACHIEVEMENT_TEXT = 22;
 	public static final int IN_ACHIEVEMENT_DONE = 23;
 	public static final int IN_WEAR_PUMPKIN = 24;
+	public static final int IN_LOOT_CHEST = 25;
+	public static final int IN_AWARD = 26;
+	public static final int IN_ENDER_PUFF = 27;
 	public static final int HURT_MELEE = 0;
 	public static final int HURT_PROJECTILE = 1;
 	public static final int HURT_MAGIC = 2;
@@ -94,6 +97,9 @@ public final class Proto {
 	public static final int EV_LEASH = 12;
 	public static final int EV_PREVIEW = 13;
 	public static final int EV_ACTOR_BLIND = 14;
+	public static final int EV_MENU = 15;
+	public static final int EV_SQUASH = 16;
+	public static final int EV_CREDITS = 17;
 	/** Names for EV_COMMAND's formId (HostCharacter in the header): index + 1. */
 	public static final String[] HOST_CHARACTERS = { "freddy", "chica", "monty", "roxy", "vanny", "vanessa", "moon", "sun", "bot", "endo", "musicman" };
 	// Skyrim skills (ActorValue) Minecraft reports use of; weapon skills come from EV_HIT_ACTOR.
@@ -234,6 +240,9 @@ public final class Proto {
 	public static final int MC_HOLDS_SHEARS = 1 << 20;
 	public static final int MC_PUMPKIN = 1 << 21;
 	public static final int MC_HOLDS_PUMPKIN = 1 << 22;
+	public static final int MC_PAUSE_MENU = 1 << 23;
+	public static final int MC_HOLDS_JEB_TAG = 1 << 24;
+	public static final int MC_ALLOW_CHEATING = 1 << 25;
 
 	// Overlay
 	public static final long OC_STATE = 0x00;

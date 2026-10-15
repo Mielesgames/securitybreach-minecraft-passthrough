@@ -9,4 +9,7 @@ import org.spongepowered.asm.mixin.gen.Invoker;
 public interface AbstractHorseAccessor {
 	@Invoker("createInventory")
 	void skycraft$createInventory();
+
+	@org.spongepowered.asm.mixin.gen.Accessor("inventory")
+	net.minecraft.world.SimpleContainer skycraft$inventory();
 }

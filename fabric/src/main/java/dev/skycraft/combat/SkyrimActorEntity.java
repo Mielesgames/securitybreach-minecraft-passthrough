@@ -192,6 +192,15 @@ public class SkyrimActorEntity extends LivingEntity {
 		return dev.skycraft.world.SkyDig.PASSTHROUGH && other instanceof net.minecraft.world.entity.player.Player player && !player.isSpectator();
 	}
 
+	/**
+	 * In a boat or minecart it can't be pointed at: the crosshair goes to the vehicle, so the player
+	 * can get in beside it and break it (and the character goes free).
+	 */
+	@Override
+	public boolean isPickable() {
+		return !this.isPassenger() && super.isPickable();
+	}
+
 	@Override
 	public boolean shouldShowName() {
 		return false;

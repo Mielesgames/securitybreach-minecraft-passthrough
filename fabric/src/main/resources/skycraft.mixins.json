@@ -8,6 +8,7 @@
     "AbstractHorseMixin",
     "BlockCollisionsMixin",
     "BlockStateBaseMixin",
+    "EndPortalMixin",
     "EntityFluidInteractionMixin",
     "EntityPickMixin",
     "EntitySwimMixin",

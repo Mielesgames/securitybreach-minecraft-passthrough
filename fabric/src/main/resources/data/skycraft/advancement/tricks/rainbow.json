@@ -1,0 +1,19 @@
+{
+  "criteria": {
+    "done": {
+      "trigger": "minecraft:impossible"
+    }
+  },
+  "display": {
+    "title": "Party Mode",
+    "description": "Make an animatronic rainbow-coloured",
+    "icon": {
+      "id": "minecraft:name_tag"
+    },
+    "frame": "task",
+    "show_toast": true,
+    "announce_to_chat": true,
+    "hidden": false
+  },
+  "parent": "skycraft:tricks/golem"
+}

@@ -117,6 +117,47 @@ final class SecurityBreachAchievements {
 	}
 
 	// Icons: the achievements are many and alike, so a few Pizzaplex-ish items in turn.
+	/**
+	 * The tree, by achievement id: parent, icon, frame. Five branches from the root: the story
+	 * (escaping each area to the endings), the shattered animatronics, the side attractions,
+	 * collecting, and surviving.
+	 */
+	private static final Map<String, String[]> TREE = Map.ofEntries(
+		// The story.
+		Map.entry("ach_sleepover", new String[] { "root", "minecraft:red_bed", "task" }),
+		Map.entry("ach_wub", new String[] { "ach_sleepover", "minecraft:jukebox", "task" }),
+		Map.entry("ach_hazard", new String[] { "ach_wub", "minecraft:minecart", "task" }),
+		Map.entry("ach_alarm", new String[] { "ach_hazard", "minecraft:bell", "task" }),
+		Map.entry("ach_security", new String[] { "ach_alarm", "minecraft:tripwire_hook", "goal" }),
+		Map.entry("ach_superstar", new String[] { "ach_security", "minecraft:clock", "goal" }),
+		Map.entry("ach_fun", new String[] { "ach_superstar", "minecraft:nether_star", "challenge" }),
+		Map.entry("ach_me", new String[] { "ach_security", "minecraft:redstone", "task" }),
+		// The animatronics.
+		Map.entry("ach_speak", new String[] { "root", "minecraft:cake", "task" }),
+		Map.entry("ach_claw", new String[] { "ach_speak", "minecraft:turtle_helmet", "task" }),
+		Map.entry("ach_see", new String[] { "ach_claw", "minecraft:bone", "task" }),
+		Map.entry("ach_shattered", new String[] { "ach_see", "minecraft:anvil", "challenge" }),
+		// Side attractions.
+		Map.entry("ach_dessert", new String[] { "root", "minecraft:cookie", "task" }),
+		Map.entry("ach_pizza", new String[] { "ach_dessert", "minecraft:bread", "task" }),
+		Map.entry("ach_opa", new String[] { "ach_dessert", "minecraft:bowl", "task" }),
+		Map.entry("ach_party", new String[] { "root", "minecraft:paper", "task" }),
+		Map.entry("ach_lazer", new String[] { "ach_party", "minecraft:crossbow", "goal" }),
+		Map.entry("ach_heckler", new String[] { "ach_lazer", "minecraft:lightning_rod", "task" }),
+		Map.entry("ach_par", new String[] { "ach_party", "minecraft:slime_ball", "task" }),
+		Map.entry("ach_sugar", new String[] { "ach_party", "minecraft:sugar", "task" }),
+		Map.entry("ach_cheese", new String[] { "ach_party", "minecraft:glow_ink_sac", "task" }),
+		// Collecting.
+		Map.entry("ach_found", new String[] { "root", "minecraft:writable_book", "goal" }),
+		Map.entry("ach_sword", new String[] { "ach_found", "minecraft:iron_sword", "task" }),
+		Map.entry("ach_up", new String[] { "ach_found", "minecraft:firework_rocket", "task" }),
+		Map.entry("ach_vip", new String[] { "root", "minecraft:gold_ingot", "challenge" }),
+		Map.entry("ach_trophy", new String[] { "ach_vip", "minecraft:totem_of_undying", "challenge" }),
+		// Surviving.
+		Map.entry("ach_surprise", new String[] { "root", "minecraft:creeper_head", "task" }),
+		Map.entry("ach_dodge", new String[] { "ach_surprise", "minecraft:feather", "task" }),
+		Map.entry("ach_hide", new String[] { "ach_dodge", "minecraft:ender_eye", "challenge" }));
+
 	private static final String[] ICONS = {
 		"minecraft:clock", "minecraft:cake", "minecraft:music_disc_cat", "minecraft:redstone_torch", "minecraft:jack_o_lantern",
 		"minecraft:goat_horn", "minecraft:firework_rocket", "minecraft:golden_carrot", "minecraft:jukebox", "minecraft:lantern"
@@ -147,7 +188,7 @@ final class SecurityBreachAchievements {
 				    "title": "Security Breach",
 				    "description": "Survive the night at Freddy Fazbear's Mega Pizzaplex",
 				    "icon": { "id": "minecraft:clock" },
-				    "background": "minecraft:gui/advancements/backgrounds/stone",
+				    "background": "minecraft:block/black_concrete",
 				    "show_toast": false,
 				    "announce_to_chat": false
 				  }
@@ -158,18 +199,22 @@ final class SecurityBreachAchievements {
 				String[] fields = entry.getValue();
 				String path = pathOf(fields[0]);
 				boolean had = HAD.contains(index);
+				// Where it hangs in the tree, its icon and frame (unknown ones: under the root).
+				String[] place = TREE.getOrDefault(path, new String[] { "root", ICONS[index % ICONS.length], "task" });
+				String parent = place[0].equals("root") || LIST.values().stream().anyMatch(f -> pathOf(f[0]).equals(place[0])) ? place[0] : "root";
 				String body = "{\n"
-					+ "  \"parent\": \"skycraft:security_breach/root\",\n"
+					+ "  \"parent\": \"skycraft:security_breach/" + parent + "\",\n"
 					+ "  \"criteria\": { \"unlocked\": { \"trigger\": \"minecraft:impossible\" } },\n"
 					+ "  \"display\": {\n"
 					+ "    \"title\": " + json(fields[1].isEmpty() ? fields[0] : fields[1]) + ",\n"
 					+ "    \"description\": " + json(fields[2]) + ",\n"
-					+ "    \"icon\": { \"id\": \"" + ICONS[index % ICONS.length] + "\" },\n"
-					+ "    \"frame\": \"challenge\",\n"
+					+ "    \"icon\": { \"id\": \"" + place[1] + "\" },\n"
+					+ "    \"frame\": \"" + place[2] + "\",\n"
 					// Ones the player had already don't pop up all at once.
 					+ "    \"show_toast\": " + !had + ",\n"
 					+ "    \"announce_to_chat\": false,\n"
-					+ "    \"hidden\": " + HIDDEN.getOrDefault(index, false) + "\n"
+					// Steam hides them all; here the tree would stay empty, so they show.
+					+ "    \"hidden\": false\n"
 					+ "  }\n"
 					+ "}\n";
 				changed |= writeIfChanged(dir.resolve(path + ".json"), body);

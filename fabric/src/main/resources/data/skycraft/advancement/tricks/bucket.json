@@ -1,0 +1,19 @@
+{
+  "criteria": {
+    "done": {
+      "trigger": "minecraft:impossible"
+    }
+  },
+  "display": {
+    "title": "Fresh Catch",
+    "description": "Scoop an animatronic up in a bucket",
+    "icon": {
+      "id": "minecraft:water_bucket"
+    },
+    "frame": "task",
+    "show_toast": true,
+    "announce_to_chat": true,
+    "hidden": false
+  },
+  "parent": "skycraft:tricks/leash"
+}

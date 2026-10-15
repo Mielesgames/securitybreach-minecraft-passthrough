@@ -17,6 +17,7 @@ public final class SkyCollider {
 
 	public static Vec3 collide(LocalPlayer player, Vec3 move) {
 		AABB box = player.getBoundingBox();
+		move = intoKnown(box, move);
 		double step = player.maxUpStep();
 		List<SkyTri> tris = new ArrayList<>();
 		SkyCollision.trianglesNear(box.expandTowards(move).inflate(1.0, 1.0 + step, 1.0), tris);
@@ -37,6 +38,28 @@ public final class SkyCollider {
 		// Minecraft block placed on the terrain; collide that result with Minecraft blocks again.
 		return Entity.collideBoundingBox(player, new Vec3(r[0], r[1], r[2]), box, player.level(), List.of());
 	}
+
+	/**
+	 * Security Breach: the game's walls and floors reach Minecraft a region at a time, scanned
+	 * around the player. Flying fast (creative), the player outran the scan and dropped through a
+	 * floor that wasn't there yet (15 Oct). Like waiting for a chunk to load, the player doesn't
+	 * go where nothing is known yet: each direction that would is held back until it arrives.
+	 */
+	private static Vec3 intoKnown(AABB box, Vec3 move) {
+		if (!SkyClient.passthrough() || !SkyCollision.active() || SkyCollision.isKnown(box.move(move))) {
+			return move;
+		}
+		double x = SkyCollision.isKnown(box.move(move.x, 0, 0)) ? move.x : 0;
+		double y = SkyCollision.isKnown(box.move(x, move.y, 0)) ? move.y : 0;
+		double z = SkyCollision.isKnown(box.move(x, y, move.z)) ? move.z : 0;
+		if (System.currentTimeMillis() - heldLogged > 5000) {
+			heldLogged = System.currentTimeMillis();
+			dev.skycraft.SkyCraft.LOG.info("FNAFSBCraft: held back at the edge of the scanned area (the game's geometry there hasn't arrived yet)");
+		}
+		return new Vec3(x, y, z);
+	}
+
+	private static long heldLogged;
 
 	/** Highest Skyrim surface at or below {@code maxAbove} over the feet at (x, y, z), or NaN. */
 	public static double groundAt(double x, double y, double z, double maxAbove) {

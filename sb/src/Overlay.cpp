@@ -72,16 +72,24 @@ float4 Overlay(float2 uv) {
 }
 // Minecraft's crosshair and attack indicator: drawn with Minecraft's invert blend (out = src * (1 - dst)
 // + dst * (1 - src)) against the game's picture, in a pass of their own; left out of the main one.
+// Only the crosshair's own pixels are inverted: they are white (or the attack indicator's greys,
+// all three channels alike). The hand or a shield over that spot is drawn as it is.
+bool CrosshairPixel(float4 c) {
+    float3 rgb = c.a > 0.001 ? c.rgb / c.a : 0;
+    return c.a > 0.001 && max(rgb.r, max(rgb.g, rgb.b)) - min(rgb.r, min(rgb.g, rgb.b)) < 0.04 && min(rgb.r, min(rgb.g, rgb.b)) > 0.55;
+}
 float4 PSInvert(VSOut i) : SV_Target {
     if (!InInvertRect(i.pos.xy)) discard;
-    return float4(Overlay(i.uv).rgb, 0);
+    float4 c = Overlay(i.uv);
+    if (!CrosshairPixel(c)) discard;
+    return float4(c.rgb, 0);
 }
 // A picture as it is (Freddy filmed by the game), into the viewport it is drawn in.
 float4 PSPlain(VSOut i) : SV_Target {
     return float4(overlay.Sample(samp, i.uv).rgb, 1);
 }
 float4 PSMain(VSOut i) : SV_Target {
-    if (InInvertRect(i.pos.xy)) return 0;
+    if (InInvertRect(i.pos.xy) && CrosshairPixel(Overlay(i.uv))) return 0;
     float4 c = Overlay(i.uv);
     if (cursorOn > 0.5) {
         float2 p = i.pos.xy - cursor;

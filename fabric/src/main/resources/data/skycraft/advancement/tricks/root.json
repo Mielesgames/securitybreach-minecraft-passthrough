@@ -1,0 +1,17 @@
+{
+  "criteria": {
+    "linked": {
+      "trigger": "minecraft:tick"
+    }
+  },
+  "display": {
+    "title": "FNAFSBCraft",
+    "description": "Steve in the Mega Pizzaplex",
+    "icon": {
+      "id": "minecraft:clock"
+    },
+    "background": "minecraft:block/purple_concrete",
+    "show_toast": false,
+    "announce_to_chat": false
+  }
+}

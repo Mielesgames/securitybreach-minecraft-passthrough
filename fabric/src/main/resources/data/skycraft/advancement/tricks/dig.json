@@ -1,0 +1,19 @@
+{
+  "criteria": {
+    "done": {
+      "trigger": "minecraft:impossible"
+    }
+  },
+  "display": {
+    "title": "Breaking and Entering",
+    "description": "Dig into the Pizzaplex itself (experiment)",
+    "icon": {
+      "id": "minecraft:iron_pickaxe"
+    },
+    "frame": "task",
+    "show_toast": true,
+    "announce_to_chat": true,
+    "hidden": false
+  },
+  "parent": "skycraft:tricks/root"
+}

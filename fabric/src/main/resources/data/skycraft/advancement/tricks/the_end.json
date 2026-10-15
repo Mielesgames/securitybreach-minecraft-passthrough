@@ -1,0 +1,19 @@
+{
+  "parent": "skycraft:tricks/root",
+  "criteria": {
+    "done": {
+      "trigger": "minecraft:impossible"
+    }
+  },
+  "display": {
+    "title": "The End?",
+    "description": "Step into an end portal in the Pizzaplex",
+    "icon": {
+      "id": "minecraft:end_portal_frame"
+    },
+    "frame": "challenge",
+    "show_toast": true,
+    "announce_to_chat": true,
+    "hidden": true
+  }
+}

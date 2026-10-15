@@ -63,6 +63,10 @@ public final class SkyDigClient {
 	 * as mining the block it's made of would take. Returns true if it's being mined.
 	 */
 	public static boolean attack(Minecraft minecraft) {
+		// Security Breach: mining its floors and walls is an experiment, off unless enabled.
+		if (SkyDig.PASSTHROUGH && !dev.skycraft.SkyCraft.experiments(minecraft.getSingleplayerServer())) {
+			return false;
+		}
 		if (SkyDig.PASSTHROUGH && !(minecraft.hitResult instanceof SkyClip.SkyrimHitResult) && minecraft.level != null && minecraft.player != null
 			&& minecraft.gameMode != null && (minecraft.hitResult == null || minecraft.hitResult.getType() == net.minecraft.world.phys.HitResult.Type.MISS)) {
 			return attackHoleWall(minecraft);

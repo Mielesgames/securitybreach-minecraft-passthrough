@@ -275,6 +275,9 @@ public final class WorldExporter {
 							var model = Minecraft.getInstance().getModelManager().getBlockStateModelSet().get(state);
 							blockRenderer.tesselateBlock(MESH, x, y, z, level, pos.immutable(), state, model, state.getSeed(pos));
 						}
+						if (state.is(net.minecraft.world.level.block.Blocks.END_PORTAL)) {
+							endPortal(x, y, z);
+						}
 					}
 				}
 			}
@@ -453,6 +456,22 @@ public final class WorldExporter {
 			}
 			return out;
 		});
+	}
+
+	/**
+	 * An end portal's surface: Minecraft draws it with a shader of its own (no model), so it gets
+	 * a quad of the mod's starfield texture at the portal's height, seen from above and below, at
+	 * full brightness.
+	 */
+	private static void endPortal(int x, int y, int z) {
+		var sprite = Minecraft.getInstance().getAtlasManager().getAtlasOrThrow(net.minecraft.data.AtlasIds.BLOCKS)
+			.getSprite(net.minecraft.resources.Identifier.fromNamespaceAndPath("skycraft", "block/end_portal_surface"));
+		float[] r = atlas.rect(sprite);
+		float top = y + 0.75F;
+		float[] uv = { r[0], r[1], r[0], r[3], r[2], r[3], r[2], r[1] };
+		MESH.wall(new float[] { x, top, z, x, top, z + 1, x + 1, top, z + 1, x + 1, top, z }, uv, 0xF000F0, Direction.UP);
+		MESH.wall(new float[] { x, top, z, x + 1, top, z, x + 1, top, z + 1, x, top, z + 1 },
+			new float[] { uv[0], uv[1], uv[6], uv[7], uv[4], uv[5], uv[2], uv[3] }, 0xF000F0, Direction.DOWN);
 	}
 
 	/** Grass and leaves are grey in the atlas; Minecraft tints them. RGBA8, 0 for none. */

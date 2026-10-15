@@ -1,0 +1,19 @@
+{
+  "criteria": {
+    "done": {
+      "trigger": "minecraft:impossible"
+    }
+  },
+  "display": {
+    "title": "Night Terror",
+    "description": "Give an animatronic wings",
+    "icon": {
+      "id": "minecraft:phantom_membrane"
+    },
+    "frame": "task",
+    "show_toast": true,
+    "announce_to_chat": true,
+    "hidden": false
+  },
+  "parent": "skycraft:tricks/slippery"
+}

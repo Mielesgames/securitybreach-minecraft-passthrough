@@ -106,7 +106,10 @@ namespace skycraft::proto
 		kMcCreative = 1u << 10,    // creative mode: breaks things in one hit
 		kMcHoldsSword = 1u << 11,  // a sword in the main hand: in creative it breaks nothing
 		kMcHoldsFlipTag = 1u << 12,  // a name tag named Dinnerbone or Grumm in the main hand
-		kMcDoorsLocked = 1u << 13,   // gamerule skycraft:allow_opening_doors is off
+		kMcDoorsLocked = 1u << 13,   // gamerule allow_opening_doors is off
+		kMcAllowCheating = 1u << 25, // gamerule allow_cheating: the game's "you can't use this now" is ignored
+		kMcHoldsJebTag = 1u << 24,   // a name tag called jeb_ in the main hand: right-click makes a host character rainbow
+		kMcPauseMenu = 1u << 23,     // Security Breach's pause menu in Minecraft's style is open: the host pauses the game
 		kMcHoldsPumpkin = 1u << 22,  // something a host character can be given to wear in the main hand (a carved pumpkin,
 		                             // ice, frost walker boots): right-click puts it on
 		kMcPumpkin = 1u << 21,       // a carved pumpkin on the head: host characters see the player less far
@@ -200,6 +203,11 @@ namespace skycraft::proto
 		kInSwing = 9,        // swing the main hand (the player used something in the host game)
 		kInTokenName = 11,   // part of a broken object's name: code = token id, a, b, c = 12 characters (latin-1, 0 = end)
 		kInDropToken = 12,   // drop the paper for a broken object: code = token id, a, b, c = where (Minecraft x 100)
+		kInEnderPuff = 27,       // a host character teleported like an enderman: its sound and purple particles at a, b, c
+		                         // (Minecraft x 100; sent for where it went from and where it went to)
+		kInAward = 26,           // a trick happened on the host's side: award advancement `code` (1 = rainbow)
+		kInLootChest = 25,       // the player came into a room for the first time: a loot chest goes on the floor at
+		                         // a, b, c (Minecraft x 100; b = the floor's height)
 		kInWearPumpkin = 24,     // what the player holds goes on host character a (its ActorTable id): a pumpkin on its
 		                         // head, ice or frost walker boots on its feet
 		kInAchievementDone = 23, // achievement `code` is complete: a = 1 if the player has it, b = 1 if hidden, c = how many
@@ -290,8 +298,13 @@ namespace skycraft::proto
 		kEvSkillUse = 5,    // the player used a Skyrim skill in Minecraft: formId = Skyrim skill (ActorValue: 9 Block,
 		                    // 10 Smithing, 11 Heavy Armor, 12 Light Armor), a = uses (as Skyrim's AdvanceSkill counts them)
 		kEvActorBlind = 14, // what a host character wears does to it: flags 1 = blind (a carved pumpkin), 2 = slips (ice
-		                    // or frost walker boots on its feet), 0 = nothing. Repeated
+		                    // or frost walker boots on its feet), 4 = stuck (slime or honey), 8 = ender (an ender pearl:
+		                    // teleports like an enderman), 0 = nothing. Repeated
 		                    // every 2 s while it does
+		kEvCredits = 17,    // the player stepped into an end portal: Security Breach's credits roll
+		kEvSquash = 16,     // a falling anvil landed on a host character (formId): it is squashed to half its height
+		kEvMenu = 15,       // a button of the pause menu that is the host's: flags 1 = its own menu, 2 = quit to
+		                    // title, 3 = quit the game
 		kEvPreview = 13,    // Freddy's mule screen is open: a/b = the preview box's top left, c/d its size, in GUI
 		                    // pixels (the host shows Freddy there). Every tick while open
 		kEvLeash = 12,      // a host character is on a lead: formId, a/b/c = where the other end is (the player's

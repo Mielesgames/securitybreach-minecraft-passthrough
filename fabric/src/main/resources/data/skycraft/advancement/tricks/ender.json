@@ -1,0 +1,19 @@
+{
+  "parent": "skycraft:tricks/blind",
+  "criteria": {
+    "done": {
+      "trigger": "minecraft:impossible"
+    }
+  },
+  "display": {
+    "title": "Don't Blink",
+    "description": "Give an animatronic an ender pearl",
+    "icon": {
+      "id": "minecraft:ender_pearl"
+    },
+    "frame": "task",
+    "show_toast": true,
+    "announce_to_chat": true,
+    "hidden": false
+  }
+}

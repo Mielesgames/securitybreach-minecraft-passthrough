@@ -70,6 +70,40 @@ public final class SkyCombat {
 		return PROXIES.get(formId);
 	}
 
+	/** Tag on a mob the mod keeps from falling (kept with the mob, so a saved one gets gravity back). */
+	private static final String FLOATING_TAG = "skycraft_floating";
+
+	/**
+	 * Security Breach's floors reach Minecraft only around the player. A mob further out (a jockey's
+	 * chicken spawned where its animatronic stood) had no floor and fell through it, taking the
+	 * animatronic along (15 Oct). Until its spot is known it hangs where it is, like a mob in an
+	 * unloaded chunk.
+	 */
+	private static void holdInUnknown(ServerLevel level) {
+		if (!dev.skycraft.world.SkyDig.PASSTHROUGH || !dev.skycraft.world.SkyCollision.active()) {
+			return;
+		}
+		for (var entity : level.getAllEntities()) {
+			if (!(entity instanceof net.minecraft.world.entity.Mob mob)) {
+				continue;
+			}
+			boolean held = mob.entityTags().contains(FLOATING_TAG);
+			boolean known = dev.skycraft.world.SkyCollision.isKnown(mob.getBoundingBox().expandTowards(0, -1.0, 0));
+			if (!known && (held || !mob.isNoGravity())) {
+				if (!held) {
+					mob.addTag(FLOATING_TAG);
+					SkyCraft.LOG.info("FNAFSBCraft: {} waits for the game's floor under it", mob.getName().getString());
+				}
+				mob.setNoGravity(true);
+				var motion = mob.getDeltaMovement();
+				mob.setDeltaMovement(0, Math.max(0, motion.y), 0);
+			} else if (known && held) {
+				mob.removeTag(FLOATING_TAG);
+				mob.setNoGravity(false);
+			}
+		}
+	}
+
 	private static void serverTick(MinecraftServer server) {
 		List<ServerPlayer> players = server.getPlayerList().getPlayers();
 		if (!SkyLink.active() || players.isEmpty()) {
@@ -84,6 +118,10 @@ public final class SkyCombat {
 			sync(level);
 		}
 		FreddyMount.follow(level, PROXIES.values());
+		golemsReach(level);
+		survivalOnly(level);
+		anvilsFall(level);
+		holdInUnknown(level);
 		// Hits land during the tick (melee, sweeps, arrows, fire); send one combined hit per actor.
 		for (SkyrimActorEntity proxy : PROXIES.values()) {
 			float[] hit = proxy.takeHit();
@@ -164,6 +202,7 @@ public final class SkyCombat {
 			return;
 		}
 		holder.setLeashedTo(player, true);
+		SkyCraft.award(level.getServer(), "leash");
 		if (!player.getAbilities().instabuild && player.getMainHandItem().is(net.minecraft.world.item.Items.LEAD)) {
 			player.getMainHandItem().shrink(1);
 		}
@@ -233,7 +272,20 @@ public final class SkyCombat {
 		if (stack.is(net.minecraft.world.item.Items.CARVED_PUMPKIN)) {
 			return net.minecraft.world.entity.EquipmentSlot.HEAD;
 		}
+		if (sticky(stack)) {
+			return net.minecraft.world.entity.EquipmentSlot.LEGS;
+		}
+		if (stack.is(net.minecraft.world.item.Items.ENDER_PEARL)) {
+			return net.minecraft.world.entity.EquipmentSlot.MAINHAND;
+		}
 		return slippery(stack) ? net.minecraft.world.entity.EquipmentSlot.FEET : null;
+	}
+
+	/** Slime or honey on a character: it gets stuck, walking at a third of its pace. */
+	private static boolean sticky(net.minecraft.world.item.ItemStack stack) {
+		return stack.is(net.minecraft.world.item.Items.SLIME_BALL) || stack.is(net.minecraft.world.item.Items.SLIME_BLOCK)
+			|| stack.is(net.minecraft.world.item.Items.HONEY_BLOCK) || stack.is(net.minecraft.world.item.Items.HONEY_BOTTLE)
+			|| stack.is(net.minecraft.world.item.Items.HONEYCOMB);
 	}
 
 	private static boolean slippery(net.minecraft.world.item.ItemStack stack) {
@@ -265,7 +317,7 @@ public final class SkyCombat {
 		if (proxy == null) {
 			return;
 		}
-		for (var slot : new net.minecraft.world.entity.EquipmentSlot[] { net.minecraft.world.entity.EquipmentSlot.HEAD, net.minecraft.world.entity.EquipmentSlot.FEET, net.minecraft.world.entity.EquipmentSlot.CHEST }) {
+		for (var slot : new net.minecraft.world.entity.EquipmentSlot[] { net.minecraft.world.entity.EquipmentSlot.HEAD, net.minecraft.world.entity.EquipmentSlot.FEET, net.minecraft.world.entity.EquipmentSlot.LEGS, net.minecraft.world.entity.EquipmentSlot.MAINHAND, net.minecraft.world.entity.EquipmentSlot.CHEST }) {
 			var worn = proxy.getItemBySlot(slot);
 			if (!worn.isEmpty()) {
 				// Into the hand that cut it: dropped at the character's feet it would put it on again.
@@ -314,6 +366,7 @@ public final class SkyCombat {
 					net.minecraft.world.effect.MobEffects.INVISIBILITY, net.minecraft.world.effect.MobEffectInstance.INFINITE_DURATION, 0, false, false));
 				if (level.addFreshEntity(chicken) && level.addFreshEntity(rider) && rider.startRiding(chicken, true, false)) {
 					JOCKEYS.put(id, rider);
+					SkyCraft.award(level.getServer(), "jockey");
 					SkyCraft.LOG.info("FNAFSBCraft: {} is a chicken jockey", proxy.getName().getString());
 				} else {
 					chicken.discard();
@@ -335,9 +388,94 @@ public final class SkyCombat {
 			SkyCraft.LOG.info("FNAFSBCraft: {} lost its chicken", proxy.getName().getString());
 			return false;
 		}
+		// After the player, also in creative (where Minecraft's monsters let players be): the chicken
+		// and its rider are sent to the nearest player once a second.
+		if (level.getGameTime() % 20 == 0 && chicken instanceof net.minecraft.world.entity.Mob ride) {
+			var player = level.getNearestPlayer(chicken, 48.0);
+			if (player != null && !player.isSpectator() && chicken.distanceToSqr(player) > 2.0) {
+				ride.getNavigation().moveTo(player, 1.4);
+				rider.getNavigation().moveTo(player, 1.4);
+			}
+		}
 		// Sitting on the chicken's back.
 		SkyLink.pushEvent(Proto.EV_ACTOR_AT, id, (float) chicken.getX(), (float) chicken.getY() + 0.4F, (float) chicken.getZ(), chicken.getYRot(), 0);
 		return true;
+	}
+
+	/**
+	 * Iron golems circled the host's characters without hitting them: the stand-in's box and the
+	 * character's real place differ a little, and the melee goal never got "close enough". A golem
+	 * whose target is within reach (2.5 blocks across, 3 up or down) hits it once its arm is ready.
+	 */
+	private static void golemsReach(ServerLevel level) {
+		if (!dev.skycraft.world.SkyDig.PASSTHROUGH || PROXIES.isEmpty() || level.getGameTime() % 10 != 0) {
+			return;
+		}
+		for (var proxy : PROXIES.values()) {
+			for (var golem : level.getEntitiesOfClass(net.minecraft.world.entity.animal.golem.IronGolem.class, proxy.getBoundingBox().inflate(3.0),
+				g -> g.getTarget() == proxy && g.getAttackAnimationTick() <= 0)) {
+				double dx = golem.getX() - proxy.getX(), dz = golem.getZ() - proxy.getZ();
+				if (dx * dx + dz * dz < 2.5 * 2.5 && Math.abs(golem.getY() - proxy.getY()) < 3.0) {
+					golem.getLookControl().setLookAt(proxy);
+					if (golem.doHurtTarget(level, proxy)) {
+						SkyCraft.award(level.getServer(), "golem");
+					}
+				}
+			}
+		}
+	}
+
+	/** Per falling anvil (its entity id), the characters it squashed already: once each a fall. */
+	/**
+	 * Without the gamerule allow_cheating, Security Breach is played in survival: another
+	 * game mode is put back once a second, with a word why.
+	 */
+	private static void survivalOnly(ServerLevel level) {
+		if (!dev.skycraft.world.SkyDig.PASSTHROUGH || level.getGameTime() % 20 != 0
+			|| level.getServer().overworld().getGameRules().get(SkyCraft.ALLOW_CHEATING)) {
+			return;
+		}
+		for (var player : level.players()) {
+			if (player.gameMode() != net.minecraft.world.level.GameType.SURVIVAL) {
+				player.setGameMode(net.minecraft.world.level.GameType.SURVIVAL);
+				player.sendSystemMessage(net.minecraft.network.chat.Component.literal(
+					"Cheating is disabled, you can switch gamemodes only if you set the gamerule allow_cheating to true").withStyle(net.minecraft.ChatFormatting.RED));
+				SkyCraft.LOG.info("FNAFSBCraft: {} put back in survival (allow_cheating is off)", player.getName().getString());
+			}
+		}
+	}
+
+	private static final Map<Integer, java.util.Set<Integer>> ANVIL_HITS = new HashMap<>();
+	private static final Map<Integer, Integer> SQUASHES = new HashMap<>();
+
+	/** A falling anvil on a host character squashes it (the host halves its height). */
+	private static void anvilsFall(ServerLevel level) {
+		if (!dev.skycraft.world.SkyDig.PASSTHROUGH || PROXIES.isEmpty()) {
+			return;
+		}
+		java.util.Set<Integer> falling = new java.util.HashSet<>();
+		for (var proxy : PROXIES.values()) {
+			for (var anvil : level.getEntitiesOfClass(net.minecraft.world.entity.item.FallingBlockEntity.class, proxy.getBoundingBox().inflate(0.1, 0.4, 0.1),
+				f -> f.getBlockState().is(net.minecraft.tags.BlockTags.ANVIL) && f.getDeltaMovement().y < -0.05)) {
+				falling.add(anvil.getId());
+				// Only from above: its bottom over the top half of the character.
+				if (anvil.getY() < proxy.getY() + proxy.getBbHeight() * 0.5) {
+					continue;
+				}
+				if (ANVIL_HITS.computeIfAbsent(anvil.getId(), k -> new java.util.HashSet<>()).add(proxy.formId())) {
+					SkyLink.pushEvent(Proto.EV_SQUASH, proxy.formId(), 0, 0, 0, 0, 0);
+					SkyCraft.award(level.getServer(), "squash");
+					// Three times halved is as flat as the host goes.
+					if (SQUASHES.merge(proxy.formId(), 1, Integer::sum) >= 3) {
+						SkyCraft.award(level.getServer(), "shattered_all");
+					}
+					level.playSound(null, proxy.blockPosition(), net.minecraft.sounds.SoundEvents.ANVIL_LAND, net.minecraft.sounds.SoundSource.BLOCKS, 1.0F, 1.0F);
+					SkyCraft.LOG.info("FNAFSBCraft: an anvil squashed {}", proxy.getName().getString());
+				}
+			}
+		}
+		// Anvils that landed (or are gone) are forgotten.
+		ANVIL_HITS.keySet().removeIf(id -> !falling.contains(id) && level.getEntity(id) == null);
 	}
 
 	private static final Map<Integer, Long> NEXT_BOUNCE = new HashMap<>();
@@ -417,7 +555,13 @@ public final class SkyCombat {
 			SkyCraft.LOG.info("FNAFSBCraft: {} put on {}", proxy.getName().getString(), proxy.getItemBySlot(slot).getHoverName().getString());
 		}
 		int effects = (proxy.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.HEAD).is(net.minecraft.world.item.Items.CARVED_PUMPKIN) ? 1 : 0)
-			| (slippery(proxy.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.FEET)) ? 2 : 0);
+			| (slippery(proxy.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.FEET)) ? 2 : 0)
+			| (sticky(proxy.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.LEGS)) ? 4 : 0)
+			| (proxy.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND).is(net.minecraft.world.item.Items.ENDER_PEARL) ? 8 : 0);
+		// Standing on ice (any kind) is as slippery as wearing it.
+		if (!proxy.isPassenger() && level.getBlockState(net.minecraft.core.BlockPos.containing(a.x(), a.y() - 0.1, a.z())).is(net.minecraft.tags.BlockTags.ICE)) {
+			effects |= 2;
+		}
 		// On ice it has no grip: a player walking into it shoves it along.
 		if ((effects & 2) != 0) {
 			for (var player : level.getEntitiesOfClass(net.minecraft.world.entity.player.Player.class, proxy.getBoundingBox().inflate(0.35, 0.0, 0.35),
@@ -430,11 +574,27 @@ public final class SkyCombat {
 			}
 		}
 		Integer hadEffects = BLIND.put(id, effects);
+		int newly = effects & ~(hadEffects == null ? 0 : hadEffects);
+		if ((newly & 1) != 0) {
+			SkyCraft.award(level.getServer(), "blind");
+		}
+		if ((newly & 2) != 0) {
+			SkyCraft.award(level.getServer(), "slippery");
+		}
+		if ((newly & 4) != 0) {
+			SkyCraft.award(level.getServer(), "sticky");
+		}
+		if ((newly & 8) != 0) {
+			SkyCraft.award(level.getServer(), "ender");
+		}
 		if ((hadEffects == null ? effects != 0 : hadEffects != effects) || (effects != 0 && now % 40 == 0)) {
 			SkyLink.pushEvent(Proto.EV_ACTOR_BLIND, id, 0, 0, 0, 0, effects);
 		}
 		boolean wings = proxy.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.CHEST).is(net.minecraft.world.item.Items.ELYTRA);
 		Boolean had = WINGS.put(id, wings);
+		if (wings && (had == null || !had)) {
+			SkyCraft.award(level.getServer(), a.name().toLowerCase(java.util.Locale.ROOT).contains("freddy") ? "freddy_wings" : "wings");
+		}
 		if ((had == null ? wings : had != wings) || (wings && now % 40 == 0)) {
 			SkyLink.pushEvent(Proto.EV_ACTOR_WINGS, id, 0, 0, 0, 0, wings ? 1 : 0);
 			if (had == null || had != wings) {

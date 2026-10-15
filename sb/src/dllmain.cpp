@@ -78,6 +78,9 @@ static constexpr int kBreakHits = 5;
 static constexpr int kDoorBreakHits = 12;
 static constexpr int kFenceBreakHits = 8;
 static constexpr int kStatueBreakHits = 15;
+// Any other small object (survival), and how big it may be (half size, Unreal units: ~4 blocks across).
+static constexpr int kPropBreakHits = 6;
+static constexpr float kMaxSmallPropExtent = 140.0f;
 // Half the size (Unreal units) above which something is part of the
 // building, not a prop that can be broken.
 static constexpr float kMaxPropExtent = 500.0f;
@@ -112,6 +115,9 @@ static constexpr ULONGLONG kPickClickMs = 250;
 // A shield stops characters this close in front of it (2 blocks), at most this often.
 static constexpr double kShieldReach = 140.0;
 static constexpr ULONGLONG kShieldBashMs = 600;
+// How hard the shield throws a character back (a sword hit is 1.0; the
+// lowest hit_character allows is 0.5).
+static constexpr double kShieldPush = 0.5;
 // A footstep every this many Unreal units (1.2 blocks).
 static constexpr double kStepUnits = 84.0;
 // How far in front of Freddy the camera for his mule screen stands.
@@ -123,6 +129,19 @@ static constexpr double kCaptiveLeash = 700.0;
 // Minecraft blocks within this many blocks of Steve get a box in the game, at most this many.
 static constexpr int kBlockerRange = 10;
 static constexpr std::size_t kMaxBlockers = 600;
+// How long a /tp waits for its zone to load.
+static constexpr ULONGLONG kTpWaitMs = 10000;
+// Percent chance of a loot chest the first time in a room.
+static constexpr ULONGLONG kLootChance = 35;
+// Squashed no flatter than this (height scale).
+static constexpr float kMinSquash = 0.125f;
+// The gamerule allow_cheating, for the static helpers (set every tick).
+static bool g_allow_cheating = false;
+// The music under the end portal's ending: one of the game's own endings.
+static constexpr const wchar_t* kEndingMusic = STR("/Game/Audio/Assets/Cinematics/Play_cine_loadingDockEnding.Play_cine_loadingDockEnding");
+// How far the camera must stray from where it hangs above Gregory before
+// the eye height follows (Unreal units); less is its frame lag and bobbing.
+static constexpr double kEyeSettle = 30.0;
 // UE's MOVE_None: a character in a bucket doesn't move.
 static constexpr std::uint8_t kMoveNone = 0;
 // A lead Minecraft hasn't mentioned for this long is gone.
@@ -266,7 +285,7 @@ public:
     bool creative_mode = false;
     bool holds_sword = false;
     bool holds_flip_tag = false;
-    // Gamerule skycraft:allow_opening_doors is off.
+    // Gamerule allow_opening_doors is off.
     bool doors_locked = false;
     // The broken-object paper in Minecraft's main hand (0: none).
     std::uint32_t held_token = 0;
@@ -301,6 +320,42 @@ public:
     ULONGLONG shield_bash_tick = 0;
 
     bool holds_shears = false;
+
+    // To the game, Gregory sits inside Freddy (Steve rides him).
+    bool gregory_inside = false;
+    RC::Unreal::FWeakObjectPtr gregory_ref;
+    ULONGLONG freddy_hud_tick = 0;
+    bool holds_jeb_tag = false;
+    // Gamerule allow_cheating: use what the game says can't be used now.
+    bool allow_cheating = false;
+
+    // Characters gone rainbow (jeb_): their mesh, the colour parameters of
+    // its materials, and what those were to begin with.
+    struct Rainbow
+    {
+        RC::Unreal::FWeakObjectPtr object;
+        RC::Unreal::FWeakObjectPtr mesh;
+        std::vector<std::pair<RC::Unreal::FName, std::array<float, 4>>> parameters;
+        float phase = 0.0f;
+    };
+
+    std::vector<Rainbow> rainbows;
+
+    // The game is paused because Minecraft's version of its menu is open.
+    bool menu_paused = false;
+
+    // A /tp to a zone that isn't loaded: the places to try, until when, and when last tried.
+    bool tp_pending = false;
+    std::vector<std::array<double, 3>> tp_candidates;
+    ULONGLONG tp_deadline = 0;
+    ULONGLONG tp_try_tick = 0;
+    std::uint32_t tp_zone = 0;
+    double tp_origin[3]{};
+
+    // Rooms the player has been in (their names), kept in rooms.txt next to the mod.
+    std::set<std::wstring> visited_rooms;
+    bool visited_loaded = false;
+    ULONGLONG rooms_tick = 0;
 
     // Minecraft's blocks in the game's world: invisible boxes (TriggerBoxes
     // made to block everything but pawns) for each run of solid blocks along
@@ -347,6 +402,8 @@ public:
         float friction = 8.0f;
         float braking = 2048.0f;
         float braking_factor = 2.0f;
+        float braking_flying = 0.0f;
+        float acceleration = 2048.0f;
     };
 
     std::vector<Slippery> slippery;
@@ -354,6 +411,7 @@ public:
     // Freddy's picture for his mule screen: when Minecraft last said the
     // screen is open, and the camera the game films him with.
     ULONGLONG preview_tick = 0;
+    int preview_mouse[2]{};
     RC::Unreal::FWeakObjectPtr preview_camera;
     bool preview_failed = false;
 
@@ -414,9 +472,23 @@ public:
         RC::Unreal::FWeakObjectPtr object;
         float walk_speed = 0.0f;
         ULONGLONG seen = 0;
+        // Given to it (it wears slime or honey): kept until Minecraft says it's off.
+        bool worn = false;
     };
 
     std::vector<Sticky> sticky;
+
+    // Characters with an ender pearl: endermen. When each next teleports,
+    // and whether a blow should send it away now.
+    struct Ender
+    {
+        RC::Unreal::FWeakObjectPtr object;
+        ULONGLONG seen = 0;
+        ULONGLONG next = 0;
+        bool flee = false;
+    };
+
+    std::vector<Ender> enders;
 
     // Minecraft's spyglass is at the eye.
     bool spyglass_up = false;
@@ -543,8 +615,15 @@ public:
     double safe_spot[3]{};
     bool have_safe_spot = false;
     ULONGLONG supported_tick = 0;
-    // Only compared, never dereferenced.
+    // Only compared, never dereferenced: live_character() is the one to use
+    // (after Quit to Title this still points at the destroyed Gregory).
     RC::Unreal::UObject* last_character = nullptr;
+    RC::Unreal::FWeakObjectPtr last_character_ref;
+
+    auto live_character() -> RC::Unreal::UObject*
+    {
+        return last_character_ref.Get();
+    }
     bool minecraft_mode = false;
     bool minecraft_launch_started = false;
     bool f6_was_down = false;
@@ -1263,7 +1342,8 @@ public:
 
         // The game's pause menu: Minecraft's picture would cover it and
         // Minecraft would eat its clicks. Hand everything back while paused.
-        game_paused = is_game_paused(controller);
+        update_menu(controller, have_mc_state && minecraft_mode && (mc_state.flags & skycraft::proto::kMcPauseMenu) != 0);
+        game_paused = is_game_paused(controller) && !menu_paused;
 
         // One of the game's own screens (the upgrade terminal, a mission
         // screen): it shows its mouse pointer for those. Same as a pause:
@@ -1389,9 +1469,21 @@ public:
             }
         }
 
+        // Inside Freddy (Steve rides him) the game makes Freddy the player's
+        // pawn; to the mod the player stays Gregory, or it starts over (and
+        // got off and on again ten times a second, seen 15 Oct).
+        if (gregory_inside)
+        {
+            if (auto* inside = gregory_ref.Get())
+            {
+                first_person_character = inside;
+            }
+        }
+
         if (first_person_character != last_character)
         {
             last_character = first_person_character;
+            last_character_ref = first_person_character != nullptr ? RC::Unreal::FWeakObjectPtr(first_person_character) : RC::Unreal::FWeakObjectPtr{};
             gregory_found = false;
         }
 
@@ -1632,6 +1724,10 @@ public:
         handle_events();
 
         update_roster(first_person_character);
+        update_rainbows();
+        update_rooms(first_person_character);
+        update_tp();
+        update_revealed();
         update_preview();
 
         if (have_mc_state && (mc_state.flags & skycraft::proto::kMcInWorld) != 0)
@@ -1725,6 +1821,9 @@ public:
         creative_mode = (mc_state.flags & skycraft::proto::kMcCreative) != 0;
         holds_sword = (mc_state.flags & skycraft::proto::kMcHoldsSword) != 0;
         holds_flip_tag = (mc_state.flags & skycraft::proto::kMcHoldsFlipTag) != 0;
+        holds_jeb_tag = (mc_state.flags & skycraft::proto::kMcHoldsJebTag) != 0;
+        allow_cheating = (mc_state.flags & skycraft::proto::kMcAllowCheating) != 0;
+        g_allow_cheating = allow_cheating;
         doors_locked = (mc_state.flags & skycraft::proto::kMcDoorsLocked) != 0;
         holds_lead = (mc_state.flags & skycraft::proto::kMcHoldsLead) != 0;
         holds_bucket = (mc_state.flags & skycraft::proto::kMcHoldsBucket) != 0;
@@ -1758,6 +1857,7 @@ public:
             update_leads(first_person_character);
             release_captives();
             update_wings(first_person_character);
+            update_enders(first_person_character);
             update_blind();
             update_spyglass(controller, (mc_state.flags & skycraft::proto::kMcScoping) != 0);
             update_shield(first_person_character, (mc_state.flags & skycraft::proto::kMcBlocking) != 0);
@@ -1793,6 +1893,13 @@ public:
         // hands would be in the way of Steve's.
         {
             auto* wanted = minecraft_mode && driving ? first_person_character : nullptr;
+
+            // Inside Freddy the game hides Gregory itself (and the player's
+            // pawn may be Freddy, who must stay visible): hands off.
+            if (gregory_inside)
+            {
+                wanted = hidden_character;
+            }
 
             if (wanted != hidden_character)
             {
@@ -1864,6 +1971,21 @@ public:
         const double gap_x = sb_x - location.X();
         const double gap_y = sb_y - location.Y();
         const double gap = std::sqrt(gap_x * gap_x + gap_y * gap_y);
+
+        // A /tp is waiting for its zone to load: Gregory stays put, nobody drives.
+        if (tp_pending)
+        {
+            driving = false;
+            return;
+        }
+
+        // Gregory is inside Freddy (Steve rides him): the ride moves Freddy,
+        // and Gregory goes with him; moving him here would pull him out.
+        if (gregory_inside)
+        {
+            hide_freddy_hud();
+            return;
+        }
 
         if (!driving)
         {
@@ -1941,9 +2063,18 @@ public:
         {
             const double measured = view.position[2] - location.Z();
 
-            eye_above_actor = have_eye_above_actor
-                ? eye_above_actor + (measured - eye_above_actor) * 0.1
-                : measured;
+            // The camera trails Gregory by a frame and bobs a little: following
+            // every wobble fed the shift back into itself and Steve shook
+            // (seen 15 Oct, Gregory's height swinging 17 units while Minecraft
+            // stood still). Only a real change (the game moved its camera) counts.
+            if (!have_eye_above_actor)
+            {
+                eye_above_actor = measured;
+            }
+            else if (std::abs(measured - eye_above_actor) > kEyeSettle)
+            {
+                eye_above_actor += (measured - eye_above_actor) * 0.1;
+            }
             have_eye_above_actor = true;
 
             eye_shift = std::clamp(
@@ -2238,6 +2369,22 @@ public:
             }
         }
 
+        // A character Minecraft carries (in a boat or minecart): the click is
+        // for the vehicle (getting in beside it), so Minecraft's.
+        {
+            double far_end[3]{};
+
+            reach(kUseReach, far_end);
+
+            auto* who = collision::trace(character, view.position, far_end, kAttackThickness);
+
+            if (who != nullptr && std::any_of(captives.begin(), captives.end(), [who](const Captive& c) { return c.object.Get() == who; }))
+            {
+                input::forward_use_click();
+                return;
+            }
+        }
+
         // Freddy is a mule: using him is getting on. (While riding, Minecraft's
         // inventory key opens his saddle and chest.)
         if (!riding_freddy)
@@ -2287,6 +2434,25 @@ public:
         {
             input::consume_use_click();
             return;
+        }
+
+        // A name tag called jeb_ on a character: its colours cycle like
+        // Minecraft's jeb_ sheep. Again puts them back.
+        if (holds_jeb_tag)
+        {
+            double far_end[3]{};
+
+            reach(kUseReach, far_end);
+
+            auto* who = collision::trace(character, view.position, far_end, kAttackThickness);
+
+            if (who != nullptr && who->GetFunctionByNameInChain(STR("GetController")) != nullptr)
+            {
+                toggle_rainbow(who);
+                g_link.push_input(skycraft::proto::kInSwing, 0);
+                input::consume_use_click();
+                return;
+            }
         }
 
         // A name tag called Dinnerbone or Grumm on a character: upside down,
@@ -2353,8 +2519,30 @@ public:
     // else the game lets the player use is used the game's way.
     auto use_object(RC::Unreal::UObject* target, RC::Unreal::UObject* character, RC::Unreal::UObject* controller) -> bool
     {
-        // Gamerule skycraft:allow_opening_doors off: doors are the game's
+        // On Freddy, a charging station takes Freddy in, as in the game.
+        if (gregory_inside)
+        {
+            if (auto* enter = target->GetFunctionByNameInChain(STR("ForceEnterPowerStation")))
+            {
+                alignas(16) std::uint8_t no_params[16]{};
+
+                target->ProcessEvent(enter, no_params);
+
+                RC::Output::send<RC::LogLevel::Default>(STR("SBMP ride: Freddy goes into {}\n"), target->GetFullName());
+                return true;
+            }
+        }
+
+        // Gamerule allow_opening_doors off: doors are the game's
         // business (its own interaction below still works, with its locks).
+        // A door the game keeps locked for Gregory stays shut for Steve too,
+        // unless allow_cheating is on.
+        if (!doors_locked && !g_allow_cheating && target->GetFunctionByNameInChain(STR("ForceDoorOpen")) != nullptr && door_locked(target))
+        {
+            RC::Output::send<RC::LogLevel::Default>(STR("SBMP use: {} is locked\n"), target->GetFullName());
+            return true;
+        }
+
         if (!doors_locked && target->GetFunctionByNameInChain(STR("ForceDoorOpen")) != nullptr)
         {
             bool is_open = false;
@@ -2382,6 +2570,31 @@ public:
             );
 
             return false;
+        }
+
+        // The game's own "not now" (a button that is switched off, a station
+        // that isn't ready): Gregory couldn't, so neither can Steve, unless
+        // the gamerule allow_cheating is on.
+        if (!allow_cheating)
+        {
+            if (auto* can = target->GetFunctionByNameInChain(STR("CanPlayerInteract")))
+            {
+                // (out bool CanInteract, out EConditionFailReason CantReason)
+                alignas(16) std::uint8_t answer[16]{};
+
+                target->ProcessEvent(can, answer);
+
+                if (answer[0] == 0)
+                {
+                    RC::Output::send<RC::LogLevel::Default>(
+                        STR("SBMP use: the game says {} can't be used now (reason {})\n"),
+                        target->GetFullName(),
+                        static_cast<int>(answer[1])
+                    );
+
+                    return true;
+                }
+            }
         }
 
         // Things the game makes you hold the button for (presents, some
@@ -2442,7 +2655,7 @@ public:
             L"freddy", L"chica", L"monty", L"roxy", L"vanny", L"vanessa", L"moon", L"sun", L"bot", L"endo", L"musicman"
         };
 
-        auto* player = last_character;
+        auto* player = live_character();
 
         if (who == 0 || who > std::size(kNames) || player == nullptr || !view.valid)
         {
@@ -2602,22 +2815,122 @@ public:
             character_class->GetFullName(),
             spawned != nullptr ? STR("done") : STR("the game refused")
         );
+
+        // The game may hide a second one of a character it means to be one
+        // of (Freddy): for a few seconds it is shown again and again.
+        if (spawned != nullptr)
+        {
+            Revealed fresh;
+
+            fresh.object = spawned;
+            fresh.until = ::GetTickCount64() + 4000;
+            revealed.push_back(fresh);
+        }
+    }
+
+    // Copies just summoned: made visible every tick for a while, and what the
+    // game did to them logged once (hidden? where?), to learn why a second
+    // Freddy can't be seen.
+    struct Revealed
+    {
+        RC::Unreal::FWeakObjectPtr object;
+        ULONGLONG until = 0;
+        bool logged = false;
+    };
+
+    std::vector<Revealed> revealed;
+
+    auto update_revealed() -> void
+    {
+        const ULONGLONG tick = ::GetTickCount64();
+
+        for (auto it = revealed.begin(); it != revealed.end();)
+        {
+            auto* target = it->object.Get();
+
+            if (target == nullptr || tick > it->until)
+            {
+                if (target == nullptr)
+                {
+                    RC::Output::send<RC::LogLevel::Default>(STR("SBMP summon: the copy is gone again (the game removed it)\n"));
+                }
+
+                it = revealed.erase(it);
+                continue;
+            }
+
+            bool hidden = false;
+            call_getter(target, STR("IsHidden"), hidden);
+
+            auto* mesh = target->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("Mesh"));
+            bool mesh_visible = true;
+
+            if (mesh != nullptr && *mesh != nullptr)
+            {
+                call_getter(*mesh, STR("IsVisible"), mesh_visible);
+            }
+
+            if (!it->logged && tick + 3000 > it->until)
+            {
+                it->logged = true;
+
+                const auto at = reinterpret_cast<RC::Unreal::AActor*>(target)->K2_GetActorLocation();
+
+                RC::Output::send<RC::LogLevel::Default>(
+                    STR("SBMP summon: {} at ({}, {}, {}), actor hidden: {}, mesh visible: {}\n"),
+                    target->GetFullName(),
+                    at.X(),
+                    at.Y(),
+                    at.Z(),
+                    hidden ? STR("yes") : STR("no"),
+                    mesh != nullptr && *mesh != nullptr ? (mesh_visible ? STR("yes") : STR("no")) : STR("no mesh")
+                );
+            }
+
+            call_with(target, STR("SetActorHiddenInGame"), false);
+
+            if (mesh != nullptr && *mesh != nullptr)
+            {
+                // SetVisibility(bool bNewVisibility, bool bPropagateToChildren): only the
+                // body itself. Its children include parts the game keeps hidden (Freddy's,
+                // for when Gregory is inside him: seen 15 Oct as a huge shape at the camera).
+                call_with(*mesh, STR("SetVisibility"), std::uint16_t{ 0x0001 });
+                call_with(*mesh, STR("SetHiddenInGame"), std::uint16_t{ 0x0000 });
+            }
+
+            ++it;
+        }
     }
 
     // Loads a blueprint class by its asset path (UKismetSystemLibrary::LoadClassAsset_Blocking).
     static auto load_class(RC::Unreal::UObject* world_context, const std::wstring& path) -> RC::Unreal::UObject*
     {
-        static auto* library = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UObject*>(
-            nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
         static auto* function = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UFunction*>(
             nullptr, nullptr, STR("/Script/Engine.KismetSystemLibrary:LoadClassAsset_Blocking"));
+
+        return load_soft(function, STR("AssetClass"), path);
+    }
+
+    // Loads any asset by its path (UKismetSystemLibrary::LoadAsset_Blocking).
+    static auto load_asset(RC::Unreal::UObject* world_context, const std::wstring& path) -> RC::Unreal::UObject*
+    {
+        static auto* function = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UFunction*>(
+            nullptr, nullptr, STR("/Script/Engine.KismetSystemLibrary:LoadAsset_Blocking"));
+
+        return load_soft(function, STR("Asset"), path);
+    }
+
+    static auto load_soft(RC::Unreal::UFunction* function, const wchar_t* parameter, const std::wstring& path) -> RC::Unreal::UObject*
+    {
+        static auto* library = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UObject*>(
+            nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
 
         if (library == nullptr || function == nullptr)
         {
             return nullptr;
         }
 
-        auto* asset = function->FindProperty(RC::Unreal::FName(STR("AssetClass"), RC::Unreal::FNAME_Find));
+        auto* asset = function->FindProperty(RC::Unreal::FName(parameter, RC::Unreal::FNAME_Find));
         auto* result = function->GetReturnProperty();
 
         if (asset == nullptr || result == nullptr)
@@ -2683,6 +2996,126 @@ public:
         }
 
         return folder + L"\\characters.txt";
+    }
+
+    // rooms.txt, next to characters.txt.
+    static auto rooms_file() -> std::wstring
+    {
+        auto path = characters_file();
+
+        return path.substr(0, path.find_last_of(L"\\/")) + L"\\rooms.txt";
+    }
+
+    // Once a second: the room the player is in (the game's RoomAreaBase with
+    // bPlayerIsInRoom). The first time in a room, in Minecraft mode, there is a
+    // chance of a Minecraft loot chest on its floor somewhere. Rooms seen are
+    // remembered across sessions, so each room gives loot at most once.
+    auto update_rooms(RC::Unreal::UObject* player) -> void
+    {
+        const ULONGLONG tick = ::GetTickCount64();
+
+        if (player == nullptr || !minecraft_mode || !driving || tick - rooms_tick < 1000)
+        {
+            return;
+        }
+
+        rooms_tick = tick;
+
+        if (!visited_loaded)
+        {
+            visited_loaded = true;
+
+            if (std::FILE* file = _wfopen(rooms_file().c_str(), L"r, ccs=UTF-8"))
+            {
+                wchar_t line[512];
+
+                while (std::fgetws(line, static_cast<int>(std::size(line)), file) != nullptr)
+                {
+                    std::wstring name = line;
+
+                    while (!name.empty() && (name.back() == L'\n' || name.back() == L'\r'))
+                    {
+                        name.pop_back();
+                    }
+
+                    if (!name.empty())
+                    {
+                        visited_rooms.insert(name);
+                    }
+                }
+
+                std::fclose(file);
+            }
+        }
+
+        std::vector<RC::Unreal::UObject*> rooms;
+
+        RC::Unreal::UObjectGlobals::FindAllOf(STR("RoomAreaBase"), rooms);
+
+        for (auto* room : rooms)
+        {
+            auto* inside = room != nullptr ? room->GetValuePtrByPropertyNameInChain<bool>(STR("bPlayerIsInRoom")) : nullptr;
+
+            if (inside == nullptr || !*inside)
+            {
+                continue;
+            }
+
+            const std::wstring name = room->GetName();
+
+            if (!visited_rooms.insert(name).second)
+            {
+                continue;
+            }
+
+            if (std::FILE* file = _wfopen(rooms_file().c_str(), L"a, ccs=UTF-8"))
+            {
+                std::fputws((name + L"\n").c_str(), file);
+                std::fclose(file);
+            }
+
+            const bool lucky = (tick * 2654435761ull >> 16) % 100 < kLootChance;
+
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP rooms: first time in {}, {}\n"),
+                name,
+                lucky ? STR("a loot chest") : STR("no loot")
+            );
+
+            if (!lucky)
+            {
+                continue;
+            }
+
+            // A place on the room's floor, with room for a block above it.
+            std::vector<std::array<double, 3>> places;
+
+            for (int i = 0; i < 6; ++i)
+            {
+                float random[3]{};
+
+                if (call_getter(room, STR("GetRandomLocationInRoom"), random))
+                {
+                    places.push_back({ random[0], random[1], random[2] });
+                }
+            }
+
+            double spot[3]{};
+
+            if (!standing_spot(player, places, spot))
+            {
+                RC::Output::send<RC::LogLevel::Default>(STR("SBMP rooms: no floor for the chest in {}\n"), name);
+                continue;
+            }
+
+            g_link.push_input(
+                skycraft::proto::kInLootChest,
+                0,
+                static_cast<std::int32_t>(sb_to_mc_x(spot[0]) * 100.0),
+                static_cast<std::int32_t>(sb_to_mc_y(spot[2]) * 100.0),
+                static_cast<std::int32_t>(sb_to_mc_z(spot[1]) * 100.0)
+            );
+        }
     }
 
     // Keeps the list of character classes across sessions, so one met
@@ -2810,6 +3243,14 @@ public:
     }
 
     // Opens or closes one of the game's doors for good, lock or no lock.
+    // Whether the game keeps this door locked for Gregory (BP_DoorMaster's IsDoorLockedForPlayer).
+    static auto door_locked(RC::Unreal::UObject* door) -> bool
+    {
+        bool locked = false;
+
+        return call_getter(door, STR("IsDoorLockedForPlayer"), locked) && locked;
+    }
+
     static auto set_door(RC::Unreal::UObject* target, bool open) -> void
     {
         auto* force = target->GetFunctionByNameInChain(open ? STR("ForceDoorOpen") : STR("ForceDoorClose"));
@@ -2823,16 +3264,26 @@ public:
         // and shut again right away for whoever may not. Take the lock
         // off and switch the automatic part off for the player, so the
         // door stays the way Steve left it.
+        // Without allow_cheating the lock, the security level and the
+        // key a door wants stay: only the automatic part is switched off.
         if (auto* door = target->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("Door")); door != nullptr && *door != nullptr)
         {
-            call_with(*door, STR("SetLockedForPlayer"), false);
-            call_with(*door, STR("SetSecurityLevel"), std::int32_t{ 0 });
+            if (g_allow_cheating)
+            {
+                call_with(*door, STR("SetLockedForPlayer"), false);
+                call_with(*door, STR("SetSecurityLevel"), std::int32_t{ 0 });
+            }
+
             call_with(*door, STR("SetAutomaticDoorEnableForPlayer"), false);
         }
 
         // No key or pass needed any more (an empty name), and nothing
         // invisible left standing in the doorway.
-        call_with(target, STR("SetDoorRequiredItem"), std::uint64_t{ 0 });
+        if (g_allow_cheating)
+        {
+            call_with(target, STR("SetDoorRequiredItem"), std::uint64_t{ 0 });
+        }
+
         call_with(target, STR("ClearPlayerBlocker"), std::uint64_t{ 0 });
 
         alignas(16) std::uint8_t no_params[16]{};
@@ -2945,7 +3396,7 @@ public:
                 }
             }
 
-            if (powered != door.powered && !doors_locked)
+            if (powered != door.powered && !doors_locked && (g_allow_cheating || !door_locked(object)))
             {
                 door.powered = powered;
                 set_door(object, powered);
@@ -3589,6 +4040,28 @@ public:
             }
         }
 
+        // Blocks that aren't full cubes (doors, fences, slabs, trapdoors): one
+        // box each, as Minecraft shapes them. Key: the box in sixteenths of a
+        // block packed into the four numbers, length negative to tell them apart.
+        std::map<std::array<int, 4>, std::array<float, 6>> shaped;
+
+        {
+            const double low[3] = { double(cx - kBlockerRange), double(cy - kBlockerRange), double(cz - kBlockerRange) };
+            const double high[3] = { double(cx + kBlockerRange + 1), double(cy + kBlockerRange + 1), double(cz + kBlockerRange + 1) };
+            std::vector<std::array<float, 6>> boxes;
+
+            world::shapes_in(low, high, boxes);
+
+            for (const auto& box : boxes)
+            {
+                const auto q = [](float v) { return static_cast<int>(std::lround(v * 16.0f)); };
+                const std::array<int, 4> key{ q(box[0]) * 4096 + q(box[3]), q(box[1]) * 4096 + q(box[4]), q(box[2]), -(q(box[5]) + 1) };
+
+                shaped[key] = box;
+                wanted[key] = true;
+            }
+        }
+
         // Gone: their boxes go.
         for (auto it = blockers.begin(); it != blockers.end();)
         {
@@ -3616,13 +4089,32 @@ public:
                 continue;
             }
 
-            const double centre[3] = {
-                mc_to_sb_x(key[0] + key[3] * 0.5),
-                mc_to_sb_z(key[2] + 0.5),
-                mc_to_sb_y(key[1] + 0.5),
-            };
-            const double half = skycraft::proto::kUnitsPerBlock * 0.5 - 0.5;
-            const double extent[3] = { half + (key[3] - 1) * skycraft::proto::kUnitsPerBlock * 0.5, half, half };
+            double centre[3]{};
+            double extent[3]{};
+
+            if (key[3] < 0)
+            {
+                // A shaped block's box (Minecraft x, y, z order: min then max).
+                const auto& box = shaped[key];
+
+                centre[0] = mc_to_sb_x((box[0] + box[3]) * 0.5);
+                centre[1] = mc_to_sb_z((box[2] + box[5]) * 0.5);
+                centre[2] = mc_to_sb_y((box[1] + box[4]) * 0.5);
+                extent[0] = (std::max)((box[3] - box[0]) * skycraft::proto::kUnitsPerBlock * 0.5 - 0.25, 1.0);
+                extent[1] = (std::max)((box[5] - box[2]) * skycraft::proto::kUnitsPerBlock * 0.5 - 0.25, 1.0);
+                extent[2] = (std::max)((box[4] - box[1]) * skycraft::proto::kUnitsPerBlock * 0.5 - 0.25, 1.0);
+            }
+            else
+            {
+                const double half = skycraft::proto::kUnitsPerBlock * 0.5 - 0.5;
+
+                centre[0] = mc_to_sb_x(key[0] + key[3] * 0.5);
+                centre[1] = mc_to_sb_z(key[2] + 0.5);
+                centre[2] = mc_to_sb_y(key[1] + 0.5);
+                extent[0] = half + (key[3] - 1) * skycraft::proto::kUnitsPerBlock * 0.5;
+                extent[1] = half;
+                extent[2] = half;
+            }
 
             auto* actor = make_blocker(player, centre, extent);
 
@@ -3799,7 +4291,7 @@ public:
 
     // Honey: a character on it walks at a third of its pace, for as long as
     // Minecraft keeps saying so (it repeats every tick).
-    auto slow_down(RC::Unreal::UObject* target) -> void
+    auto slow_down(RC::Unreal::UObject* target, bool worn = false) -> void
     {
         auto* movement = target->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("CharacterMovement"));
 
@@ -3836,6 +4328,152 @@ public:
         }
 
         known->seen = tick;
+        known->worn = known->worn || worn;
+    }
+
+    // Slime or honey taken off (shears): its own pace again right away.
+    auto unstick(RC::Unreal::UObject* target) -> void
+    {
+        auto known = std::find_if(sticky.begin(), sticky.end(), [target](const Sticky& s) { return s.object.Get() == target && s.worn; });
+
+        if (known == sticky.end())
+        {
+            return;
+        }
+
+        if (auto* movement = target->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("CharacterMovement")); movement != nullptr && *movement != nullptr)
+        {
+            if (auto* speed = (*movement)->GetValuePtrByPropertyNameInChain<float>(STR("MaxWalkSpeed")))
+            {
+                *speed = known->walk_speed;
+            }
+        }
+
+        sticky.erase(known);
+
+        RC::Output::send<RC::LogLevel::Default>(STR("SBMP honey: {} is free again\n"), target->GetFullName());
+    }
+
+    auto set_ender(RC::Unreal::UObject* target, bool on) -> void
+    {
+        auto known = std::find_if(enders.begin(), enders.end(), [target](const Ender& e) { return e.object.Get() == target; });
+
+        if (!on)
+        {
+            if (known != enders.end())
+            {
+                enders.erase(known);
+                RC::Output::send<RC::LogLevel::Default>(STR("SBMP ender: {} is itself again\n"), target->GetFullName());
+            }
+
+            return;
+        }
+
+        if (known == enders.end())
+        {
+            Ender fresh;
+
+            fresh.object = target;
+            fresh.next = ::GetTickCount64() + 2000;
+            enders.push_back(fresh);
+            known = enders.end() - 1;
+
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP ender: {} is an enderman now ({})\n"),
+                target->GetFullName(),
+                is_freddy(target) ? STR("Freddy: never angry, wanders") : STR("always angry: comes after Steve")
+            );
+        }
+
+        known->seen = ::GetTickCount64();
+    }
+
+    // Endermen: an angry one more than 6 blocks from the player teleports
+    // to a place 3 to 6 blocks from him every few seconds; Freddy (never
+    // angry) now and then to somewhere near himself. A blow sends either
+    // somewhere else at once. Places need a floor and room to stand.
+    auto update_enders(RC::Unreal::UObject* player) -> void
+    {
+        if (enders.empty() || player == nullptr)
+        {
+            return;
+        }
+
+        const ULONGLONG tick = ::GetTickCount64();
+        const auto here = reinterpret_cast<RC::Unreal::AActor*>(player)->K2_GetActorLocation();
+
+        for (auto it = enders.begin(); it != enders.end();)
+        {
+            auto* target = it->object.Get();
+
+            if (target == nullptr || tick - it->seen > 5000)
+            {
+                it = enders.erase(it);
+                continue;
+            }
+
+            if (tick < it->next && !it->flee)
+            {
+                ++it;
+                continue;
+            }
+
+            auto* actor = reinterpret_cast<RC::Unreal::AActor*>(target);
+            const auto at = actor->K2_GetActorLocation();
+            const bool freddy_ender = is_freddy(target);
+            const double distance = std::hypot(at.X() - here.X(), at.Y() - here.Y());
+
+            // An angry one close enough just walks (or attacks); no need to blink.
+            if (!freddy_ender && !it->flee && distance < 6.0 * skycraft::proto::kUnitsPerBlock)
+            {
+                it->next = tick + 1500;
+                ++it;
+                continue;
+            }
+
+            // Around the player (angry), or around itself (Freddy, or fleeing a blow).
+            const bool toward_player = !freddy_ender && !it->flee;
+            const double centre[3] = { toward_player ? here.X() : at.X(), toward_player ? here.Y() : at.Y(), toward_player ? here.Z() : at.Z() };
+            const double low = toward_player ? 3.0 : 6.0;
+            const double high = toward_player ? 6.0 : 14.0;
+            std::vector<std::array<double, 3>> places;
+
+            for (int i = 0; i < 10; ++i)
+            {
+                const double seed = static_cast<double>((tick * 2654435761ull + i * 40503ull) % 100000) / 100000.0;
+                const double angle = seed * 6.28318530718;
+                const double radius = (low + (high - low) * std::fmod(seed * 7.0, 1.0)) * skycraft::proto::kUnitsPerBlock;
+
+                places.push_back({ centre[0] + std::cos(angle) * radius, centre[1] + std::sin(angle) * radius, centre[2] });
+            }
+
+            double spot[3]{};
+
+            if (standing_spot(player, places, spot))
+            {
+                g_link.push_input(
+                    skycraft::proto::kInEnderPuff,
+                    0,
+                    static_cast<std::int32_t>(sb_to_mc_x(at.X()) * 100.0),
+                    static_cast<std::int32_t>(sb_to_mc_y(at.Z() - capsule_half_height(target)) * 100.0),
+                    static_cast<std::int32_t>(sb_to_mc_z(at.Y()) * 100.0)
+                );
+
+                move_actor(actor, spot[0], spot[1], spot[2] + capsule_half_height(target) + 5.0);
+
+                g_link.push_input(
+                    skycraft::proto::kInEnderPuff,
+                    0,
+                    static_cast<std::int32_t>(sb_to_mc_x(spot[0]) * 100.0),
+                    static_cast<std::int32_t>(sb_to_mc_y(spot[2]) * 100.0),
+                    static_cast<std::int32_t>(sb_to_mc_z(spot[1]) * 100.0)
+                );
+            }
+
+            it->flee = false;
+            it->next = tick + (freddy_ender ? 6000 + tick % 6000 : 2500 + tick % 2500);
+            ++it;
+        }
     }
 
     auto update_wobbles() -> void
@@ -3851,7 +4489,7 @@ public:
                 continue;
             }
 
-            if (::GetTickCount64() - it->seen > 500)
+            if (::GetTickCount64() - it->seen > (it->worn ? 5000u : 500u))
             {
                 if (auto* movement = target->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("CharacterMovement")); movement != nullptr && *movement != nullptr)
                 {
@@ -3886,6 +4524,36 @@ public:
             else
             {
                 ++it;
+            }
+        }
+    }
+
+    // Freddy's own screen bits (his clock, his notifications) aren't Steve's:
+    // hidden once a second while Gregory is inside him. His power meter stays.
+    auto hide_freddy_hud() -> void
+    {
+        const ULONGLONG tick = ::GetTickCount64();
+
+        if (tick - freddy_hud_tick < 1000)
+        {
+            return;
+        }
+
+        freddy_hud_tick = tick;
+
+        for (const auto* name : { STR("WI_Freddy_Clock_C"), STR("WI_Freddy_FazNotification_C") })
+        {
+            std::vector<RC::Unreal::UObject*> widgets;
+
+            RC::Unreal::UObjectGlobals::FindAllOf(name, widgets);
+
+            for (auto* widget : widgets)
+            {
+                if (widget != nullptr)
+                {
+                    // ESlateVisibility::Hidden
+                    call_with(widget, STR("SetVisibility"), std::uint8_t{ 2 });
+                }
             }
         }
     }
@@ -3997,9 +4665,11 @@ public:
                 *mode = 2;  // PRM_UseShowOnlyList
             }
 
+            // His colours as they are, without the Pizzaplex's dim light (in the
+            // finished picture he was nearly black).
             if (auto* source = capture->GetValuePtrByPropertyNameInChain<std::uint8_t>(STR("CaptureSource")))
             {
-                *source = 2;  // SCS_FinalColorLDR
+                *source = 7;  // SCS_BaseColor
             }
 
             if (auto* fov = capture->GetValuePtrByPropertyNameInChain<float>(STR("FOVAngle")))
@@ -4027,19 +4697,28 @@ public:
             );
         }
 
-        // In front of Freddy, a little above his middle, looking at him.
+        // In front of Freddy, a little above his middle, looking at him. The
+        // camera goes round him the other way from the mouse, so he seems to
+        // turn towards it (Minecraft's inventory: atan(d / 40) * 40 degrees).
         float forward[3]{ 1.0f, 0.0f, 0.0f };
 
         call_getter(target, STR("GetActorForwardVector"), forward);
 
+        const double kDegrees = 3.14159265358979323846 / 180.0;
+        const double turn_yaw = std::atan(preview_mouse[0] / 40.0) * 40.0 * kDegrees;
+        const double turn_pitch = std::atan(preview_mouse[1] / 40.0) * 20.0 * kDegrees;
+        const double facing = std::atan2(forward[1], forward[0]) - turn_yaw;
+        const double out[2] = { std::cos(facing), std::sin(facing) };
+
         const auto at = reinterpret_cast<RC::Unreal::AActor*>(target)->K2_GetActorLocation();
         const double half = capsule_half_height(target);
+        const double lift = half * 0.25 + std::sin(turn_pitch) * kPreviewDistance;
 
         move_actor(
             reinterpret_cast<RC::Unreal::AActor*>(camera),
-            at.X() + forward[0] * kPreviewDistance,
-            at.Y() + forward[1] * kPreviewDistance,
-            at.Z() + half * 0.25
+            at.X() + out[0] * kPreviewDistance,
+            at.Y() + out[1] * kPreviewDistance,
+            at.Z() + lift
         );
 
         struct
@@ -4047,7 +4726,7 @@ public:
             float NewRotation[3];
             bool bTeleportPhysics;
             bool ReturnValue;
-        } turn{ { -4.0f, static_cast<float>(std::atan2(-forward[1], -forward[0]) * 180.0 / 3.14159265358979323846), 0.0f }, true, false };
+        } turn{ { static_cast<float>(-4.0 - turn_pitch / kDegrees), static_cast<float>(std::atan2(-out[1], -out[0]) / kDegrees), 0.0f }, true, false };
 
         if (auto* rotate = camera->GetFunctionByNameInChain(STR("K2_SetActorRotation")))
         {
@@ -4067,7 +4746,7 @@ public:
             { L"golf" }, { L"daycare" }, { L"utili", L"utility" }, { L"pizzasim", L"pizzaplexsim", L"sim" }, { L"fazerblast", L"lasertag", L"fazer" },
         };
 
-        auto* player = last_character;
+        auto* player = live_character();
 
         if (zone >= kZones.size() || player == nullptr)
         {
@@ -4212,9 +4891,65 @@ public:
             }
         }
 
-        const double half = capsule_half_height(player);
         double spot[3]{};
-        bool found = false;
+
+        if (!standing_spot(player, candidates, spot))
+        {
+            if (candidates.empty())
+            {
+                RC::Output::send<RC::LogLevel::Default>(
+                    STR("SBMP tp: zone {} has rooms ({}), but no places in them\n"),
+                    zone,
+                    zone_rooms.size()
+                );
+
+                say_in_chat(L"No place to stand found there.", false);
+                return;
+            }
+
+            // Not loaded yet: the map is streamed in around the first place, and
+            // the places are tried again until one has a floor (or it takes too long).
+            // The game loads its map around the camera: Gregory waits at the
+            // destination (held in the air each tick), and goes back if it doesn't load.
+            const auto origin = reinterpret_cast<RC::Unreal::AActor*>(player)->K2_GetActorLocation();
+
+            tp_origin[0] = origin.X();
+            tp_origin[1] = origin.Y();
+            tp_origin[2] = origin.Z();
+            tp_candidates = std::move(candidates);
+            tp_pending = true;
+            tp_deadline = ::GetTickCount64() + kTpWaitMs;
+            tp_zone = zone;
+            driving = false;
+
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP tp: zone {} isn't loaded, loading it around ({}, {}, {})\n"),
+                zone,
+                tp_candidates[0][0],
+                tp_candidates[0][1],
+                tp_candidates[0][2]
+            );
+
+            say_in_chat(L"Loading that part of the Pizzaplex...", false);
+            return;
+        }
+
+        place_after_tp(player, spot);
+
+        RC::Output::send<RC::LogLevel::Default>(
+            STR("SBMP tp: to zone {} in {} at ({}, {}, {})\n"),
+            zone,
+            chosen->GetFullName(),
+            spot[0],
+            spot[1],
+            spot[2]
+        );
+    }
+
+    // The first of `candidates` with a floor under it and room to stand on it.
+    auto standing_spot(RC::Unreal::UObject* player, const std::vector<std::array<double, 3>>& candidates, double spot[3]) -> bool
+    {
+        const double half = capsule_half_height(player);
 
         for (const auto& candidate : candidates)
         {
@@ -4240,38 +4975,80 @@ public:
             spot[0] = floor[0];
             spot[1] = floor[1];
             spot[2] = floor[2];
-            found = true;
-            break;
+            return true;
         }
 
-        if (!found)
-        {
-            RC::Output::send<RC::LogLevel::Default>(
-                STR("SBMP tp: zone {} has rooms ({}), but none of {} places in them has a floor with room to stand<bs>n"),
-                zone,
-                zone_rooms.size(),
-                candidates.size()
-            );
+        return false;
+    }
 
-            say_in_chat(L"No safe place to stand found there right now.", false);
-            return;
-        }
-
-        move_actor(reinterpret_cast<RC::Unreal::AActor*>(player), spot[0], spot[1], spot[2] + half + 5.0);
+    auto place_after_tp(RC::Unreal::UObject* player, const double spot[3]) -> void
+    {
+        move_actor(reinterpret_cast<RC::Unreal::AActor*>(player), spot[0], spot[1], spot[2] + capsule_half_height(player) + 5.0);
         stream_safe = false;
-
-        RC::Output::send<RC::LogLevel::Default>(
-            STR("SBMP tp: to zone {} in {} at ({}, {}, {})\n"),
-            zone,
-            chosen->GetFullName(),
-            spot[0],
-            spot[1],
-            spot[2]
-        );
 
         if (minecraft_mode)
         {
             request_sync(STR("/tp to a zone"));
+        }
+    }
+
+    // A /tp waiting for its zone to load: twice a second the places are
+    // tried again; the map meanwhile streams in around the first of them.
+    auto update_tp() -> void
+    {
+        if (!tp_pending)
+        {
+            return;
+        }
+
+        auto* player = live_character();
+        const ULONGLONG tick = ::GetTickCount64();
+
+        if (player == nullptr)
+        {
+            return;
+        }
+
+        // Held where the map has to load (the camera is what it loads around).
+        move_actor(reinterpret_cast<RC::Unreal::AActor*>(player), tp_candidates[0][0], tp_candidates[0][1], tp_candidates[0][2] + 120.0);
+
+        if (tick - tp_try_tick < 500)
+        {
+            return;
+        }
+
+        tp_try_tick = tick;
+
+        double spot[3]{};
+
+        if (standing_spot(player, tp_candidates, spot))
+        {
+            tp_pending = false;
+            place_after_tp(player, spot);
+
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP tp: zone {} loaded, at ({}, {}, {})\n"),
+                tp_zone,
+                spot[0],
+                spot[1],
+                spot[2]
+            );
+
+            return;
+        }
+
+        if (tick > tp_deadline)
+        {
+            tp_pending = false;
+            move_actor(reinterpret_cast<RC::Unreal::AActor*>(player), tp_origin[0], tp_origin[1], tp_origin[2]);
+
+            if (minecraft_mode)
+            {
+                request_sync(STR("/tp gave up"));
+            }
+
+            RC::Output::send<RC::LogLevel::Default>(STR("SBMP tp: zone {} didn't load in time\n"), tp_zone);
+            say_in_chat(L"That part of the Pizzaplex didn't load. Try again closer to it.", false);
         }
     }
 
@@ -4282,11 +5059,20 @@ public:
     // has been moved for this frame).
     auto pin_streaming() -> void
     {
-        auto* player = last_character;
+        auto* player = live_character();
         auto* viewpoint = player != nullptr ? player->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("LevelStreamViewpoint")) : nullptr;
 
         if (viewpoint == nullptr || *viewpoint == nullptr)
         {
+            return;
+        }
+
+        // A /tp waiting for its zone: the map loads around where it goes.
+        if (tp_pending && !tp_candidates.empty())
+        {
+            set_relative(*viewpoint, STR("K2_SetWorldLocation"),
+                static_cast<float>(tp_candidates[0][0]), static_cast<float>(tp_candidates[0][1]), static_cast<float>(tp_candidates[0][2]));
+            stream_pinned = true;
             return;
         }
 
@@ -4356,6 +5142,386 @@ public:
                 stream_point[1],
                 stream_point[2]
             );
+        }
+    }
+
+    // An anvil fell on it: half as tall (its whole actor, so its capsule too:
+    // it stands on the floor, flatter). Below an eighth of its height nothing
+    // more happens.
+    auto squash(RC::Unreal::UObject* target) -> void
+    {
+        float scale[3]{ 1.0f, 1.0f, 1.0f };
+
+        if (!call_getter(target, STR("GetActorScale3D"), scale) || scale[2] < kMinSquash)
+        {
+            return;
+        }
+
+        const double before = capsule_half_height(target);
+
+        scale[2] *= 0.5f;
+        call_with(target, STR("SetActorScale3D"), *reinterpret_cast<const std::array<float, 3>*>(scale));
+
+        // Its middle comes down with it, so the feet stay on the floor.
+        const auto at = reinterpret_cast<RC::Unreal::AActor*>(target)->K2_GetActorLocation();
+
+        move_actor(reinterpret_cast<RC::Unreal::AActor*>(target), at.X(), at.Y(), at.Z() - before * 0.5);
+
+        RC::Output::send<RC::LogLevel::Default>(
+            STR("SBMP anvil: {} squashed to {}% of its height\n"),
+            target->GetFullName(),
+            static_cast<int>(scale[2] * 100.0f)
+        );
+    }
+
+    // MeshComponent:SetVectorParameterValueOnMaterials(FName, FVector).
+    static auto set_material_colour(RC::Unreal::UObject* mesh, const RC::Unreal::FName& name, const float rgb[3]) -> void
+    {
+        auto* function = mesh->GetFunctionByNameInChain(STR("SetVectorParameterValueOnMaterials"));
+
+        if (function == nullptr)
+        {
+            return;
+        }
+
+        struct
+        {
+            RC::Unreal::FName ParameterName;
+            float ParameterValue[3];
+        } params{ name, { rgb[0], rgb[1], rgb[2] } };
+
+        mesh->ProcessEvent(function, &params);
+    }
+
+    // jeb_: the colour parameters of the character's materials (by name:
+    // color, colour, tint, albedo, base) are found by walking each material
+    // instance up to its parents, and cycle through the hues every tick.
+    auto toggle_rainbow(RC::Unreal::UObject* target) -> void
+    {
+        auto known = std::find_if(rainbows.begin(), rainbows.end(), [target](const Rainbow& r) { return r.object.Get() == target; });
+
+        if (known != rainbows.end())
+        {
+            if (auto* mesh = known->mesh.Get())
+            {
+                for (const auto& [name, value] : known->parameters)
+                {
+                    set_material_colour(mesh, name, value.data());
+                }
+            }
+
+            rainbows.erase(known);
+
+            RC::Output::send<RC::LogLevel::Default>(STR("SBMP jeb_: {} has its own colours again\n"), target->GetFullName());
+            return;
+        }
+
+        auto* mesh_slot = target->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("Mesh"));
+        auto* mesh = mesh_slot != nullptr ? *mesh_slot : nullptr;
+
+        if (mesh == nullptr)
+        {
+            RC::Output::send<RC::LogLevel::Default>(STR("SBMP jeb_: {} has no Mesh\n"), target->GetFullName());
+            return;
+        }
+
+        struct RawArray
+        {
+            std::uint8_t* data;
+            std::int32_t count;
+            std::int32_t room;
+        };
+
+        Rainbow fresh;
+        std::wstring all;
+
+        fresh.object = target;
+        fresh.mesh = mesh;
+
+        RawArray materials{};
+
+        if (call_getter(mesh, STR("GetMaterials"), materials) && materials.data != nullptr && materials.count > 0 && materials.count < 64)
+        {
+            for (std::int32_t m = 0; m < materials.count; ++m)
+            {
+                RC::Unreal::UObject* material = nullptr;
+
+                std::memcpy(&material, materials.data + m * 8, sizeof(material));
+
+                for (int depth = 0; material != nullptr && depth < 6; ++depth)
+                {
+                    auto* values = material->GetValuePtrByPropertyNameInChain<RawArray>(STR("VectorParameterValues"));
+
+                    if (values != nullptr && values->data != nullptr && values->count > 0 && values->count < 256)
+                    {
+                        for (std::int32_t v = 0; v < values->count; ++v)
+                        {
+                            // FVectorParameterValue: ParameterInfo (FName first), then FLinearColor at 0x10.
+                            RC::Unreal::FName name;
+                            std::array<float, 4> value{};
+
+                            std::memcpy(&name, values->data + v * 0x30, sizeof(name));
+                            std::memcpy(value.data(), values->data + v * 0x30 + 0x10, sizeof(value));
+
+                            const auto text = name.ToString();
+
+                            if (all.size() < 1200)
+                            {
+                                all += text + L", ";
+                            }
+
+                            const auto lowered = lower(text);
+                            const bool colour = lowered.find(L"color") != std::wstring::npos || lowered.find(L"colour") != std::wstring::npos ||
+                                lowered.find(L"tint") != std::wstring::npos || lowered.find(L"albedo") != std::wstring::npos ||
+                                lowered.find(L"base") != std::wstring::npos;
+
+                            if (colour && std::none_of(fresh.parameters.begin(), fresh.parameters.end(), [&text](const auto& p) { return p.first.ToString() == text; }))
+                            {
+                                fresh.parameters.push_back({ name, value });
+                            }
+                        }
+                    }
+
+                    auto* parent = material->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("Parent"));
+
+                    material = parent != nullptr ? *parent : nullptr;
+                }
+            }
+        }
+
+        RC::Output::send<RC::LogLevel::Default>(
+            STR("SBMP jeb_: {} has colour parameters {} of: {}\n"),
+            target->GetFullName(),
+            fresh.parameters.size(),
+            all.empty() ? std::wstring(L"(none)") : all
+        );
+
+        if (fresh.parameters.empty())
+        {
+            say_in_chat(L"This one doesn't have colours that can change.", false);
+            return;
+        }
+
+        rainbows.push_back(std::move(fresh));
+        g_link.push_input(skycraft::proto::kInAward, 1);
+    }
+
+    auto update_rainbows() -> void
+    {
+        for (auto it = rainbows.begin(); it != rainbows.end();)
+        {
+            auto* mesh = it->mesh.Get();
+
+            if (mesh == nullptr || it->object.Get() == nullptr)
+            {
+                it = rainbows.erase(it);
+                continue;
+            }
+
+            // Like the sheep: a full turn of the hues in about four seconds.
+            it->phase = std::fmod(it->phase + 1.0f / 240.0f, 1.0f);
+
+            const float h = it->phase * 6.0f;
+            const float x = 1.0f - std::fabs(std::fmod(h, 2.0f) - 1.0f);
+            float rgb[3]{};
+
+            if (h < 1) { rgb[0] = 1; rgb[1] = x; }
+            else if (h < 2) { rgb[0] = x; rgb[1] = 1; }
+            else if (h < 3) { rgb[1] = 1; rgb[2] = x; }
+            else if (h < 4) { rgb[1] = x; rgb[2] = 1; }
+            else if (h < 5) { rgb[0] = x; rgb[2] = 1; }
+            else { rgb[0] = 1; rgb[2] = x; }
+
+            for (const auto& [name, value] : it->parameters)
+            {
+                set_material_colour(mesh, name, rgb);
+            }
+
+            ++it;
+        }
+    }
+
+    // Easter egg: an end portal ends the game the Minecraft way. Minecraft
+    // shows the ending's pictures (EndingScreen) and then goes to the title;
+    // the game plays one of its own endings' music under them. Posted on
+    // Gregory, so it stops when he goes with the level.
+    auto play_ending_music() -> void
+    {
+        auto* gregory = live_character();
+        auto* music = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UObject*>(nullptr, nullptr, kEndingMusic);
+
+        if (music == nullptr && gregory != nullptr)
+        {
+            music = load_asset(gregory, kEndingMusic);
+        }
+
+        static auto* statics = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UObject*>(
+            nullptr, nullptr, STR("/Script/AkAudio.Default__AkGameplayStatics"));
+        static auto* post = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UFunction*>(
+            nullptr, nullptr, STR("/Script/AkAudio.AkGameplayStatics:PostEvent"));
+
+        if (music == nullptr || statics == nullptr || post == nullptr || gregory == nullptr)
+        {
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP ending: no music (event {}, Wwise {}, Gregory {})\n"),
+                music != nullptr, post != nullptr, gregory != nullptr
+            );
+            return;
+        }
+
+        // (AkEvent 0x0, Actor 0x8, CallbackMask 0x10, PostEventCallback 0x14,
+        // ExternalSources 0x28, bStopWhenAttachedToDestroyed 0x38, EventName 0x40) -> int32 0x50
+        alignas(16) std::uint8_t params[0x60]{};
+
+        std::memcpy(params + 0x0, static_cast<void*>(&music), sizeof(music));
+        std::memcpy(params + 0x8, static_cast<void*>(&gregory), sizeof(gregory));
+        params[0x38] = 1;
+
+        statics->ProcessEvent(post, params);
+
+        std::int32_t playing = 0;
+
+        std::memcpy(&playing, params + 0x50, sizeof(playing));
+
+        RC::Output::send<RC::LogLevel::Default>(STR("SBMP ending: the ending plays (music id {})\n"), playing);
+    }
+
+    // GameplayStatics:SetGamePaused(WorldContextObject, bPaused).
+    static auto set_game_paused(RC::Unreal::UObject* world_context, bool paused) -> void
+    {
+        static auto* statics = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UObject*>(
+            nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
+        static auto* function = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UFunction*>(
+            nullptr, nullptr, STR("/Script/Engine.GameplayStatics:SetGamePaused"));
+
+        if (statics == nullptr || function == nullptr)
+        {
+            return;
+        }
+
+        struct
+        {
+            RC::Unreal::UObject* WorldContextObject;
+            bool bPaused;
+            bool ReturnValue;
+        } params{ world_context, paused, false };
+
+        statics->ProcessEvent(function, &params);
+
+        // The game doesn't always let itself be paused (seen 15 Oct: it went
+        // on behind the menu). Time is slowed nearly to a stop as well:
+        // characters, clocks and timers all but freeze.
+        static auto* dilation = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UFunction*>(
+            nullptr, nullptr, STR("/Script/Engine.GameplayStatics:SetGlobalTimeDilation"));
+
+        if (dilation != nullptr)
+        {
+            struct
+            {
+                RC::Unreal::UObject* WorldContextObject;
+                float TimeDilation;
+            } slow{ world_context, paused ? 0.0001f : 1.0f };
+
+            statics->ProcessEvent(dilation, &slow);
+        }
+
+        RC::Output::send<RC::LogLevel::Default>(
+            STR("SBMP menu: SetGamePaused({}) {}, time {}\n"),
+            paused,
+            params.ReturnValue ? STR("worked") : STR("was refused"),
+            paused ? STR("nearly stopped") : STR("normal again")
+        );
+    }
+
+    // While Minecraft shows the pause menu, the game is paused (and not
+    // treated as paused by the mod: the menu, its mouse and keys are Minecraft's).
+    auto update_menu(RC::Unreal::UObject* controller, bool open) -> void
+    {
+        if (open == menu_paused)
+        {
+            return;
+        }
+
+        menu_paused = open;
+        set_game_paused(controller, open);
+
+        RC::Output::send<RC::LogLevel::Default>(
+            STR("SBMP menu: {}\n"),
+            open ? STR("open, the game is paused") : STR("closed, the game goes on")
+        );
+    }
+
+    // A button of the menu that the game does.
+    auto menu_action(std::uint32_t action) -> void
+    {
+        auto* controller = find_controller();
+
+        if (controller == nullptr)
+        {
+            return;
+        }
+
+        if (menu_paused)
+        {
+            menu_paused = false;
+            set_game_paused(controller, false);
+        }
+
+        RC::Output::send<RC::LogLevel::Default>(STR("SBMP menu: button {}\n"), action);
+
+        if (action == 1)
+        {
+            // The game's own pause menu: PauseGame(FKey Key) of its controller.
+            if (auto* pause = controller->GetFunctionByNameInChain(STR("PauseGame")))
+            {
+                alignas(16) std::uint8_t params[0x40]{};
+
+                controller->ProcessEvent(pause, params);
+            }
+            else
+            {
+                RC::Output::send<RC::LogLevel::Default>(STR("SBMP menu: the controller has no PauseGame\n"));
+            }
+
+            return;
+        }
+
+        if (action == 2)
+        {
+            std::vector<RC::Unreal::UObject*> instances;
+
+            RC::Unreal::UObjectGlobals::FindAllOf(STR("FNAFGameInstance_C"), instances);
+
+            auto* quit = !instances.empty() && instances[0] != nullptr ? instances[0]->GetFunctionByNameInChain(STR("Quit To Title")) : nullptr;
+
+            if (quit != nullptr)
+            {
+                instances[0]->ProcessEvent(quit, nullptr);
+            }
+            else
+            {
+                RC::Output::send<RC::LogLevel::Default>(STR("SBMP menu: no Quit To Title found\n"));
+            }
+
+            return;
+        }
+
+        if (action == 3)
+        {
+            static auto* library = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UObject*>(
+                nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+            static auto* quit = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UFunction*>(
+                nullptr, nullptr, STR("/Script/Engine.KismetSystemLibrary:QuitGame"));
+
+            if (library != nullptr && quit != nullptr)
+            {
+                // (WorldContextObject, SpecificPlayer, QuitPreference = Quit, bIgnorePlatformRestrictions)
+                std::vector<std::uint8_t> params(quit->GetParmsSize() + 16, 0);
+
+                std::memcpy(params.data(), &controller, sizeof(controller));
+                std::memcpy(params.data() + 8, &controller, sizeof(controller));
+                library->ProcessEvent(quit, params.data());
+            }
         }
     }
 
@@ -4682,7 +5848,7 @@ public:
                     return;
                 }
 
-                shield.self->hit_character(character, dx, dy, 1.5);
+                shield.self->hit_character(character, dx, dy, kShieldPush);
                 shield.bashed = true;
             },
             &shield
@@ -4820,6 +5986,11 @@ public:
         auto* friction = (*movement)->GetValuePtrByPropertyNameInChain<float>(STR("GroundFriction"));
         auto* braking = (*movement)->GetValuePtrByPropertyNameInChain<float>(STR("BrakingDecelerationWalking"));
         auto* braking_factor = (*movement)->GetValuePtrByPropertyNameInChain<float>(STR("BrakingFrictionFactor"));
+        // On Minecraft blocks (an ice block) it is held up "flying": that
+        // movement has its own braking, and speeding up slowly is what makes
+        // it slide through its turns.
+        auto* braking_flying = (*movement)->GetValuePtrByPropertyNameInChain<float>(STR("BrakingDecelerationFlying"));
+        auto* acceleration = (*movement)->GetValuePtrByPropertyNameInChain<float>(STR("MaxAcceleration"));
 
         if (friction == nullptr || braking == nullptr)
         {
@@ -4838,6 +6009,16 @@ public:
                     *braking_factor = known->braking_factor;
                 }
 
+                if (braking_flying != nullptr)
+                {
+                    *braking_flying = known->braking_flying;
+                }
+
+                if (acceleration != nullptr)
+                {
+                    *acceleration = known->acceleration;
+                }
+
                 slippery.erase(known);
 
                 RC::Output::send<RC::LogLevel::Default>(STR("SBMP ice: {} has a grip again\n"), target->GetFullName());
@@ -4854,6 +6035,8 @@ public:
             fresh.friction = *friction;
             fresh.braking = *braking;
             fresh.braking_factor = braking_factor != nullptr ? *braking_factor : 2.0f;
+            fresh.braking_flying = braking_flying != nullptr ? *braking_flying : 0.0f;
+            fresh.acceleration = acceleration != nullptr ? *acceleration : 2048.0f;
             slippery.push_back(fresh);
             known = slippery.end() - 1;
 
@@ -4863,6 +6046,16 @@ public:
             if (braking_factor != nullptr)
             {
                 *braking_factor = 0.1f;
+            }
+
+            if (braking_flying != nullptr)
+            {
+                *braking_flying = (std::min)(*braking_flying, 120.0f);
+            }
+
+            if (acceleration != nullptr)
+            {
+                *acceleration = fresh.acceleration * 0.3f;
             }
 
             RC::Output::send<RC::LogLevel::Default>(
@@ -5508,7 +6701,8 @@ public:
     // under the rider: Minecraft's mule does the moving, Freddy is its body.
     auto update_ride(const skycraft::proto::McState& mc, float yaw) -> void
     {
-        const bool riding = minecraft_mode && driving && (mc.flags & skycraft::proto::kMcRidingHost) != 0;
+        // (While inside, a sync doesn't end the ride: Gregory isn't driven then anyway.)
+        const bool riding = minecraft_mode && (driving || gregory_inside) && (mc.flags & skycraft::proto::kMcRidingHost) != 0;
         auto* target = freddy.Get();
 
         // Minecraft's player sits on the mule but which Freddy it is got
@@ -5547,6 +6741,21 @@ public:
                     set_movement_mode(target, kMoveFalling);
                 }
 
+                // Gregory out of Freddy again (the game's own way, without the animation).
+                if (gregory_inside && target != nullptr)
+                {
+                    gregory_inside = false;
+
+                    if (auto* eject = target->GetFunctionByNameInChain(STR("Eject Gregory")))
+                    {
+                        bool bypass = true;
+
+                        target->ProcessEvent(eject, &bypass);
+                    }
+
+                    request_sync(STR("out of Freddy"));
+                }
+
                 RC::Output::send<RC::LogLevel::Default>(
                     STR("SBMP ride: got off Freddy\n")
                 );
@@ -5561,6 +6770,34 @@ public:
         if (!riding_freddy)
         {
             riding_freddy = true;
+
+            // To the game, Steve on Freddy is Gregory in Freddy: his power,
+            // the charging stations and what only Freddy can do work as in
+            // the game. Its own way in (Freddy's Hide Gregory), without the animation.
+            auto* gregory = live_character();
+            auto* controller = find_controller();
+            auto* hide = target->GetFunctionByNameInChain(STR("Hide Gregory"));
+
+            if (gregory != nullptr && controller != nullptr && hide != nullptr && lower(gregory->GetClassPrivate()->GetName()).rfind(L"gregory", 0) == 0)
+            {
+                struct
+                {
+                    RC::Unreal::UObject* Gregory;
+                    RC::Unreal::UObject* PlayerController;
+                    bool UseAnim;
+                    bool PlaySound;
+                } params{ gregory, controller, false, false };
+
+                gregory_ref = gregory;
+                gregory_inside = true;
+                target->ProcessEvent(hide, &params);
+            }
+
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP ride: Gregory {}\n"),
+                gregory_inside ? STR("is inside Freddy now (to the game)") : STR("couldn't be put inside Freddy")
+            );
+
             set_movement_mode(target, kMoveFlying);
 
             // How far above Freddy's feet Minecraft seats its rider: measured
@@ -6054,7 +7291,7 @@ public:
     // it): that is never broken, or Steve falls through.
     auto under_player(RC::Unreal::UObject* target) -> bool
     {
-        auto* player = last_character;
+        auto* player = live_character();
 
         if (player == nullptr)
         {
@@ -6102,7 +7339,20 @@ public:
             return kFenceBreakHits;
         }
 
-        return actor->GetFunctionByNameInChain(STR("ForceDoorOpen")) != nullptr ? kDoorBreakHits : 0;
+        // Anything else small that just stands there (the names are many and
+        // unknown): breakable, unless it is something to use.
+        if (is_small_prop(actor))
+        {
+            return kPropBreakHits;
+        }
+
+        // A locked door can't be broken either (unless allow_cheating).
+        if (actor->GetFunctionByNameInChain(STR("ForceDoorOpen")) != nullptr)
+        {
+            return g_allow_cheating || !door_locked(actor) ? kDoorBreakHits : 0;
+        }
+
+        return 0;
     }
 
     // The cardboard cutouts: recognised by the name of the actor or of the
@@ -6141,6 +7391,42 @@ public:
         };
 
         return is_named(actor, component, kWords) && is_loose_prop(actor);
+    }
+
+    // A small object of the level: not part of the building (is_loose_prop),
+    // under about four blocks across and not flat as paper (decals), and
+    // nothing the player uses (save stations, hiding spots, buttons, collectibles).
+    static auto is_small_prop(RC::Unreal::UObject* actor) -> bool
+    {
+        if (!is_loose_prop(actor) ||
+            actor->GetFunctionByNameInChain(STR("OnPlayerInteract")) != nullptr ||
+            actor->GetFunctionByNameInChain(STR("GetController")) != nullptr ||
+            actor->GetFunctionByNameInChain(STR("ForceDoorOpen")) != nullptr)
+        {
+            return false;
+        }
+
+        auto* bounds = actor->GetFunctionByNameInChain(STR("GetActorBounds"));
+
+        if (bounds == nullptr)
+        {
+            return false;
+        }
+
+        struct
+        {
+            bool bOnlyCollidingComponents;
+            float Origin[3];
+            float BoxExtent[3];
+            bool bIncludeFromChildActors;
+        } query{};
+
+        actor->ProcessEvent(bounds, &query);
+
+        const float largest = (std::max)({ query.BoxExtent[0], query.BoxExtent[1], query.BoxExtent[2] });
+        const float smallest = (std::min)({ query.BoxExtent[0], query.BoxExtent[1], query.BoxExtent[2] });
+
+        return largest < kMaxSmallPropExtent && smallest > 4.0f;
     }
 
     // The name of the actor, or of the mesh it shows, has one of the words.
@@ -6375,6 +7661,15 @@ public:
 
         strength = std::clamp(strength, 0.5, 3.0);
 
+        // An enderman: away it goes on a blow.
+        for (auto& ender : enders)
+        {
+            if (ender.object.Get() == target)
+            {
+                ender.flee = true;
+            }
+        }
+
         // Carried by Minecraft (a chicken jockey, a boat, an allay): it is
         // Minecraft that throws the carrier, and the character rides along.
         // Thrown here as well, it would fly off and leave its chicken behind.
@@ -6466,6 +7761,28 @@ public:
                 continue;
             }
 
+            if (event.type == skycraft::proto::kEvSquash)
+            {
+                if (auto* target = actors::find(event.formId))
+                {
+                    squash(target);
+                }
+
+                continue;
+            }
+
+            if (event.type == skycraft::proto::kEvCredits)
+            {
+                play_ending_music();
+                continue;
+            }
+
+            if (event.type == skycraft::proto::kEvMenu)
+            {
+                menu_action(event.flags);
+                continue;
+            }
+
             if (event.type == skycraft::proto::kEvPreview)
             {
                 auto& shown = overlay::state();
@@ -6475,6 +7792,8 @@ public:
                 shown.preview_w.store(static_cast<int>(event.c), std::memory_order_relaxed);
                 shown.preview_h.store(static_cast<int>(event.d), std::memory_order_relaxed);
                 preview_tick = ::GetTickCount64();
+                preview_mouse[0] = static_cast<int>(event.formId & 0xFF) - 128;
+                preview_mouse[1] = static_cast<int>((event.formId >> 8) & 0xFF) - 128;
                 continue;
             }
 
@@ -6544,6 +7863,18 @@ public:
                 {
                     set_blind(target, (event.flags & 1) != 0);
                     set_slippery(target, (event.flags & 2) != 0);
+
+                    set_ender(target, (event.flags & 8) != 0);
+
+                    // Slime or honey given to it: slowed for as long as it has it.
+                    if ((event.flags & 4) != 0)
+                    {
+                        slow_down(target, true);
+                    }
+                    else
+                    {
+                        unstick(target);
+                    }
                 }
 
                 continue;
@@ -6647,7 +7978,7 @@ public:
     // itself is never touched.
     auto break_with_blast(const double centre[3], double reach) -> void
     {
-        auto* player = last_character;
+        auto* player = live_character();
 
         if (player == nullptr)
         {

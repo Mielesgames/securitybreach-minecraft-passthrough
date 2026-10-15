@@ -1,0 +1,13 @@
+# FNAFSBCraft: where the end portal frames are hidden in the Pizzaplex (Minecraft x y z), set by Mielesgames 15 Oct.
+-97 -19 543
+44 21 534
+-52 47 421
+-186 30 538
+-157 30 682
+-35 0 369
+163 21 616
+-8 21 276
+65 0 378
+19 21 729
+0 22 707
+-65 22 680

@@ -345,8 +345,17 @@ public final class SkyClient {
 			}
 		}
 		reportRedstone(minecraft, player);
+		footsteps(minecraft, player);
 		SecurityBreachAchievements.tick(minecraft);
 		showFreddyPreview(minecraft, player);
+		if (dev.skycraft.SkyCraft.endingRequested) {
+			dev.skycraft.SkyCraft.endingRequested = false;
+			minecraft.gui.setScreen(new EndingScreen());
+		}
+		// Minecraft's own pause screen (its Escape, or losing focus) is Security Breach's menu here.
+		if (minecraft.gui.screen() instanceof net.minecraft.client.gui.screens.PauseScreen) {
+			minecraft.gui.setScreen(new SecurityBreachMenu());
+		}
 		flyFreddy(player);
 		if (player.isDeadOrDying()) {
 			// Nothing here is meant to kill the player, and the death screen can't be seen: get up again.
@@ -406,6 +415,41 @@ public final class SkyClient {
 	}
 
 	private static boolean freddyHadWings;
+	private static double stepDistance;
+	private static double stepX, stepZ;
+
+	/**
+	 * Footsteps on Security Breach's floors. Minecraft plays a step from the block under the feet,
+	 * and the game's floor is air to it: so here, a stone step every 1.6 blocks walked on the game's
+	 * floor (Minecraft's own pace), none when sneaking or in the air.
+	 */
+	private static void footsteps(Minecraft minecraft, LocalPlayer player) {
+		double dx = player.getX() - stepX, dz = player.getZ() - stepZ;
+		stepX = player.getX();
+		stepZ = player.getZ();
+		if (!player.onGround() || player.isShiftKeyDown() || player.isPassenger() || player.getAbilities().flying) {
+			return;
+		}
+		var under = net.minecraft.core.BlockPos.containing(player.getX(), player.getY() - 0.2, player.getZ());
+		// A Minecraft block there makes its own sound.
+		if (!player.level().getBlockState(under).isAir()) {
+			return;
+		}
+		if (!dev.skycraft.world.SkyCollision.hasGeometry(under) && !dev.skycraft.world.SkyCollision.hasGeometry(under.above())) {
+			return;
+		}
+		double moved = Math.sqrt(dx * dx + dz * dz);
+		if (moved > 2.0) {
+			return; // a teleport, not a step
+		}
+		stepDistance += moved;
+		if (stepDistance < 1.6) {
+			return;
+		}
+		stepDistance = 0.0;
+		var sound = net.minecraft.world.level.block.SoundType.DEEPSLATE_TILES;
+		player.playSound(sound.getStepSound(), sound.getVolume() * 0.15F, sound.getPitch());
+	}
 
 	/**
 	 * Freddy's mule screen shows an invisible mule in its preview box. The host draws Freddy there
@@ -420,7 +464,13 @@ public final class SkyClient {
 		var window = minecraft.getWindow();
 		int left = (window.getGuiScaledWidth() - 176) / 2;
 		int top = (window.getGuiScaledHeight() - 166) / 2;
-		SkyLink.pushEvent(Proto.EV_PREVIEW, 0, left + 26, top + 18, 52, 52, 1);
+		// Where the mouse is from the box's middle (GUI pixels): Freddy looks at it, as Steve does
+		// in his own inventory. Packed into the form id: dx and dy, each + 128 in a byte.
+		double mx = minecraft.mouseHandler.xpos() * window.getGuiScaledWidth() / Math.max(1, window.getScreenWidth());
+		double my = minecraft.mouseHandler.ypos() * window.getGuiScaledHeight() / Math.max(1, window.getScreenHeight());
+		int dx = Math.max(-127, Math.min(127, (int) Math.round(mx - (left + 52))));
+		int dy = Math.max(-127, Math.min(127, (int) Math.round(my - (top + 44))));
+		SkyLink.pushEvent(Proto.EV_PREVIEW, (dx + 128) | ((dy + 128) << 8), left + 26, top + 18, 52, 52, 1);
 	}
 
 	// Redstone sources that are on, as the host game was last told.
@@ -587,6 +637,9 @@ public final class SkyClient {
 			if (player.isBlocking()) {
 				flags |= Proto.MC_BLOCKING;
 			}
+			if (minecraft.gui.screen() instanceof SecurityBreachMenu || minecraft.gui.screen() instanceof EndingScreen) {
+				flags |= Proto.MC_PAUSE_MENU;
+			}
 			if (player.isScoping()) {
 				flags |= Proto.MC_SCOPING;
 			}
@@ -597,6 +650,9 @@ public final class SkyClient {
 			if (server != null && !server.overworld().getGameRules().get(dev.skycraft.SkyCraft.ALLOW_OPENING_DOORS)) {
 				flags |= Proto.MC_DOORS_LOCKED;
 			}
+			if (server != null && server.overworld().getGameRules().get(dev.skycraft.SkyCraft.ALLOW_CHEATING)) {
+				flags |= Proto.MC_ALLOW_CHEATING;
+			}
 			// A plain water bucket (not one that already holds a character) scoops one up.
 			if (mc.heldToken == 0 && player.getMainHandItem().is(net.minecraft.world.item.Items.WATER_BUCKET)
 				&& (server == null || server.overworld().getGameRules().get(dev.skycraft.SkyCraft.ALLOW_ANIMATRONIC_WATER_BUCKET))) {
@@ -606,6 +662,9 @@ public final class SkyClient {
 				String tag = player.getMainHandItem().getHoverName().getString();
 				if (tag.equalsIgnoreCase("Dinnerbone") || tag.equalsIgnoreCase("Grumm")) {
 					flags |= Proto.MC_HOLDS_FLIP_TAG;
+				}
+				if (tag.equals("jeb_")) {
+					flags |= Proto.MC_HOLDS_JEB_TAG;
 				}
 			}
 			mc.x = feet.x;

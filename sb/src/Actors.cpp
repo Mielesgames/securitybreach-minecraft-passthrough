@@ -148,6 +148,10 @@ namespace actors
         // Characters the mod holds up on Minecraft blocks (Unreal has no
         // floor there, so they would sink into them and be pushed aside).
         std::set<RC::Unreal::UObject*> g_on_blocks;
+        // Characters the mod is lowering into a hole dug into the game's floor.
+        std::set<RC::Unreal::UObject*> g_in_hole;
+        // How far a character drops into a hole each tick (blocks).
+        constexpr double kHoleDropBlocks = 0.12;
 
         void set_movement_mode(RC::Unreal::UObject* character, std::uint8_t mode)
         {
@@ -453,6 +457,56 @@ namespace actors
                 {
                     g_on_blocks.erase(object);
                     set_movement_mode(object, kMoveFalling);
+                }
+
+                // A hole dug into the game's floor under it: for Unreal the floor
+                // is still there, so the mod lowers it in. On the hole's stone
+                // bottom (a Minecraft block) the block floor above holds it; in a
+                // hole through a thin floor it drops out of the bottom and falls
+                // on by itself.
+                if (!carried)
+                {
+                    const int bx = static_cast<int>(std::floor(x));
+                    const int bz = static_cast<int>(std::floor(z));
+                    const bool over_hole = world::dug_at(bx, static_cast<int>(std::floor(y - 0.3)), bz);
+                    const bool in_hole = g_in_hole.count(object) != 0;
+
+                    if (over_hole)
+                    {
+                        if (!in_hole)
+                        {
+                            g_in_hole.insert(object);
+                            set_movement_mode(object, kMoveFlying);
+
+                            RC::Output::send<RC::LogLevel::Default>(
+                                STR("SBMP actors: {} drops into a hole\n"),
+                                object->GetFullName()
+                            );
+                        }
+
+                        y -= kHoleDropBlocks;
+
+                        RC::Unreal::FVector lowered{
+                            location.X(),
+                            location.Y(),
+                            static_cast<float>((y + tracked.height * 0.5) * proto::kUnitsPerBlock)
+                        };
+
+                        RC::Unreal::FHitResult sweep_hit{};
+
+                        actor->K2_SetActorLocation(lowered, false, sweep_hit, false);
+                        location = actor->K2_GetActorLocation();
+                    }
+                    else if (in_hole)
+                    {
+                        // Out of the bottom of a hole through a thin floor: Unreal's own fall.
+                        g_in_hole.erase(object);
+                        set_movement_mode(object, kMoveFalling);
+                    }
+                }
+                else
+                {
+                    g_in_hole.erase(object);
                 }
             }
 

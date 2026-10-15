@@ -187,7 +187,8 @@ public final class SkyDig {
 	 */
 	public static void open(ServerPlayer player, int world, BlockPos pos, int material) {
 		ServerLevel level = player.level();
-		if (!destruction || !inReach(player, pos, REACH) || !level.isLoaded(pos) || player.isSpectator()) {
+		if (!destruction || !inReach(player, pos, REACH) || !level.isLoaded(pos) || player.isSpectator()
+			|| (PASSTHROUGH && !SkyCraft.experiments(level.getServer()))) {
 			return;
 		}
 		LevelChunk chunk = level.getChunkAt(pos);
@@ -208,6 +209,7 @@ public final class SkyDig {
 		}
 		level.levelEvent(LevelEvent.PARTICLES_AND_SOUND_DESTROY_BLOCK, pos, Block.getId(state));
 		if (PASSTHROUGH) {
+			SkyCraft.award(level.getServer(), "dig");
 			if (level.getBlockState(pos).is(Blocks.BARRIER)) {
 				level.setBlock(pos, Blocks.AIR.defaultBlockState(), 3);
 			}

@@ -1,0 +1,19 @@
+{
+  "criteria": {
+    "done": {
+      "trigger": "minecraft:impossible"
+    }
+  },
+  "display": {
+    "title": "Pumpkin Spice",
+    "description": "Put a pumpkin over an animatronic's head",
+    "icon": {
+      "id": "minecraft:carved_pumpkin"
+    },
+    "frame": "task",
+    "show_toast": true,
+    "announce_to_chat": true,
+    "hidden": false
+  },
+  "parent": "skycraft:tricks/root"
+}

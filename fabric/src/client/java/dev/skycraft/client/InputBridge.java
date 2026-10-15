@@ -66,7 +66,8 @@ public final class InputBridge {
 			case Proto.IN_OPEN_MENU -> {
 				if (minecraft.gui.screen() == null && minecraft.player != null) {
 					releaseAll();
-					minecraft.gui.setScreen(new PauseScreen(true));
+					// Security Breach: its own menu, Minecraft-styled.
+					minecraft.gui.setScreen(SkyClient.passthrough() ? new SecurityBreachMenu() : new PauseScreen(true));
 				}
 			}
 			case Proto.IN_SWING -> {
@@ -97,10 +98,43 @@ public final class InputBridge {
 							return;
 						}
 						var bucket = dev.skycraft.SkyCraft.tokenBucket(code, label);
+						dev.skycraft.SkyCraft.award(server, "bucket");
 						if (player.getMainHandItem().is(net.minecraft.world.item.Items.WATER_BUCKET) && dev.skycraft.SkyCraft.tokenOf(player.getMainHandItem()) == 0) {
 							player.setItemInHand(net.minecraft.world.InteractionHand.MAIN_HAND, bucket);
 						} else {
 							player.getInventory().add(bucket);
+						}
+					});
+				}
+			}
+			case Proto.IN_ENDER_PUFF -> {
+				// An animatronic with an ender pearl teleported: the enderman's sound and particles where it was.
+				if (minecraft.level != null) {
+					double x = a / 100.0, y = b / 100.0, z = c / 100.0;
+					minecraft.level.playLocalSound(x, y, z, net.minecraft.sounds.SoundEvents.ENDERMAN_TELEPORT, net.minecraft.sounds.SoundSource.HOSTILE, 1.0F, 1.0F, false);
+					for (int i = 0; i < 32; i++) {
+						minecraft.level.addParticle(net.minecraft.core.particles.ParticleTypes.PORTAL,
+							x + (Math.random() - 0.5), y + Math.random() * 2.0, z + (Math.random() - 0.5),
+							(Math.random() - 0.5) * 2.0, -Math.random(), (Math.random() - 0.5) * 2.0);
+					}
+				}
+			}
+			case Proto.IN_AWARD -> {
+				var server = minecraft.getSingleplayerServer();
+				if (server != null && code == 1) {
+					server.execute(() -> dev.skycraft.SkyCraft.award(server, "rainbow"));
+				}
+			}
+			case Proto.IN_LOOT_CHEST -> {
+				// A room of the Pizzaplex seen for the first time: a chest of loot on its floor.
+				var server = minecraft.getSingleplayerServer();
+				if (server != null && minecraft.player != null) {
+					var dimension = minecraft.player.level().dimension();
+					double x = a / 100.0, y = b / 100.0, z = c / 100.0;
+					server.execute(() -> {
+						var level = server.getLevel(dimension);
+						if (level != null) {
+							dev.skycraft.SkyLoot.place(level, x, y, z);
 						}
 					});
 				}
@@ -241,6 +275,7 @@ public final class InputBridge {
 							var drop = new net.minecraft.world.entity.item.ItemEntity(level, x, y + 0.5, z, dev.skycraft.SkyCraft.tokenPaper(code, label));
 							drop.setDefaultPickUpDelay();
 							level.addFreshEntity(drop);
+							dev.skycraft.SkyCraft.award(server, "break_object");
 						}
 					});
 				}
