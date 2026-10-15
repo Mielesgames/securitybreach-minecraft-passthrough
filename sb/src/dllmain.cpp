@@ -962,13 +962,45 @@ public:
             return;
         }
 
-        // A release: the Minecraft it ships (Prism Launcher, FNAFSBCraft-Minecraft.zip in the
-        // mod's folder). A build from source (SBMP_FABRIC_DIR set, or no bundle) runs the fabric
-        // project with gradlew, below.
+        // Which Minecraft: the one a release ships (Prism Launcher with the player's own account,
+        // FNAFSBCraft-Minecraft.zip in the mod's folder), or the fabric project run with gradlew
+        // (the debug one, below). FNAFSBCraft.ini in the mod's folder chooses ("Minecraft = prism"
+        // or "Minecraft = source"); without it the bundle wins when there is one.
         {
-            wchar_t dev_dir[8]{};
-            const bool from_source = ::GetEnvironmentVariableW(L"SBMP_FABRIC_DIR", dev_dir, static_cast<DWORD>(std::size(dev_dir))) > 0;
             const auto bundle = sbmp::launcher::bundle_next_to(mod_folder());
+            bool from_source = bundle.empty();
+
+            if (std::ifstream ini{ mod_folder() / "FNAFSBCraft.ini" }; ini)
+            {
+                std::string line;
+
+                while (std::getline(ini, line))
+                {
+                    std::string lowered;
+
+                    for (const char c : line)
+                    {
+                        if (c != ' ' && c != '\t' && c != '\r')
+                        {
+                            lowered += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                        }
+                    }
+
+                    if (lowered == "minecraft=source")
+                    {
+                        from_source = true;
+                    }
+                    else if (lowered == "minecraft=prism" && !bundle.empty())
+                    {
+                        from_source = false;
+                    }
+                }
+            }
+
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP launcher: Minecraft from {}\n"),
+                from_source ? STR("the fabric project (gradlew runClient)") : STR("the bundled Prism Launcher")
+            );
 
             if (!from_source && !bundle.empty())
             {

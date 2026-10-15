@@ -8,8 +8,8 @@ This is a fork of [SkyCraft](https://github.com/chasmlol/SkyCraft) (Skyrim + Min
 Skyrim half swapped for a Security Breach mod. Internally the Minecraft mod is still called
 `skycraft`.
 
-> **Status: work in progress.** A lot works, much of it is new and only lightly tested, and there
-> is no release build yet: you build it yourself (see below).
+> **Status: 1.0.0-beta.** A lot works, much of it is new and only lightly tested: expect bugs, and
+> please report them with your `UE4SS.log`.
 > This is a fan project. It isn't affiliated with Mojang, Microsoft, Steel Wool Studios or
 > ScottGames, and you need to own both games.
 
@@ -33,6 +33,12 @@ Skyrim half swapped for a Security Breach mod. Internally the Minecraft mod is s
 - What the characters say (the game's subtitles) appears in Minecraft's chat, like
   `<Chica> Employees only.`
 - "Gregory joined the game" and "Moon joined the game", in yellow, when the cast shows up.
+- **Vents:** hold Shift in front of one and walk in: Steve crawls and fits.
+- **Gregory's Sneakers:** boots in your starting kit that make Steve as fast as Gregory.
+- **One Minecraft world per save:** each Security Breach save has its own blocks and inventory.
+  Saving into another slot takes your world along.
+- The game's own scenes (cutscenes, Freddy carrying Gregory, the boot screen) take over the
+  controls; Steve comes back when they're done. **Tab** opens the Fazwatch.
 
 ### The Pizzaplex
 
@@ -130,25 +136,41 @@ Minecraft gamerules that do nothing in the Pizzaplex (raids, phantoms, weather, 
 
 ## Installing
 
-There is no release yet: build the mod first (next section).
+You need **FNAF: Security Breach** on Steam (Windows) and **Minecraft: Java Edition** on a Microsoft
+account. You don't install Minecraft yourself: the mod brings its own launcher (Prism Launcher),
+which downloads Minecraft and Java the first time.
 
-1. **UE4SS:** install it into `fnaf9\Binaries\Win64` of your Security Breach folder
-   (`Steam\steamapps\common\Quarters\fnaf9\Binaries\Win64`). Use the `UE4SS.dll` from this build
-   (`build\Game__Shipping__Win64\bin`): the mod is built against it.
-2. **The mod:** copy `build\sb\Game__Shipping__Win64\SecurityBreachMinecraftPassthrough.dll` to
-   `fnaf9\Binaries\Win64\Mods\SecurityBreachMinecraftPassthrough\dlls\main.dll`. The file has to
-   be called `main.dll`.
-3. Add `SecurityBreachMinecraftPassthrough : 1` to `Mods\mods.txt`.
-4. **Minecraft:** set the environment variable `SBMP_FABRIC_DIR` to this repository's `fabric`
-   folder. The mod starts Minecraft from there itself (`gradlew runClient`); you don't open the
-   Minecraft launcher. This needs JDK 25.
-5. **DirectX 11:** in Steam, right-click Security Breach → Properties → Launch options, and enter
-   `-dx11`. Under DirectX 12 the mod draws nothing.
-6. Start Security Breach and load a save. Minecraft starts in the background (the first start takes
-   a few minutes), and you become Steve once both are ready.
+1. **Download** `FNAFSBCraft-1.0.0-beta.zip` from the
+   [Releases](https://github.com/Mielesgames/securitybreach-minecraft-passthrough/releases) page.
+2. **Find the game's folder:** in Steam, right-click Five Nights at Freddy's: Security Breach →
+   Manage → Browse local files. That opens the `Quarters` folder.
+3. **Unpack the zip into that folder.** It adds files to `fnaf9\Binaries\Win64` (UE4SS and the
+   mod). Say yes if Windows asks to merge folders.
+4. **Launch options:** in Steam, right-click the game → Properties → General → Launch Options,
+   and type `-dx11`. Without it (DirectX 12) the mod can't draw anything.
+5. **Start Security Breach** from Steam. The first time:
+   - Prism Launcher opens and asks you to sign in with the Microsoft account that owns Minecraft.
+     Alt-tab to it if you don't see it.
+   - It then downloads Minecraft and Java. That takes a few minutes; Minecraft runs in the
+     background, you don't see its window.
+6. **Load a save** (or start a new game). You become Steve as soon as both are ready. F6 switches
+   between Steve and Gregory.
 
-`UE4SS.log` next to the game's exe shows what the mod does (lines starting with `SBMP`);
-Minecraft's log is `fabric\run\logs\latest.log`.
+Already using UE4SS with other mods? This release brings its own `UE4SS.dll` (the mod needs that
+build); keep your own `Mods` folder, the zip only adds `Mods\SecurityBreachMinecraftPassthrough`.
+
+**Which Minecraft:** `Mods\SecurityBreachMinecraftPassthrough\FNAFSBCraft.ini` says `Minecraft = prism`
+(the bundled launcher with your own account, so your skin and cape). Developers can switch it to
+`Minecraft = source` (see Building). Starting the FNAFSBCraft instance in Prism on its own starts
+Security Breach through Steam.
+
+**To uninstall:** delete `dwmapi.dll`, `UE4SS.dll`, `UE4SS-settings.ini` and
+`Mods\SecurityBreachMinecraftPassthrough` from `fnaf9\Binaries\Win64`. Minecraft's files are in
+`%LOCALAPPDATA%\FNAFSBCraft`.
+
+**If something goes wrong:** `UE4SS.log` in `fnaf9\Binaries\Win64` shows what the mod does (lines
+starting with `SBMP`). Minecraft's log is in
+`%LOCALAPPDATA%\FNAFSBCraft\Prism\instances\FNAFSBCraft\.minecraft\logs\latest.log`.
 
 ## Building
 
@@ -161,8 +183,19 @@ cmake -S . -B build -G "Visual Studio 18 2026"
 cmake --build build --config Game__Shipping__Win64 --target SecurityBreachMinecraftPassthrough
 ```
 
-The first build also builds UE4SS itself, which takes a while. The Minecraft mod is built by
-Gradle when the game starts Minecraft.
+The first build also builds UE4SS itself, which takes a while.
+
+**Running a build from source:** install the `UE4SS.dll` from `build\Game__Shipping__Win64\bin`
+(with UE4SS 3.0.1's `dwmapi.dll`) and copy
+`build\sb\Game__Shipping__Win64\SecurityBreachMinecraftPassthrough.dll` to
+`fnaf9\Binaries\Win64\Mods\SecurityBreachMinecraftPassthrough\dlls\main.dll`, with an empty
+`enabled.txt` next to `dlls`. Set the environment variable `SBMP_FABRIC_DIR` to this repository's
+`fabric` folder: the mod then starts Minecraft from there with `gradlew runClient` (JDK 25) instead
+of the bundled launcher. Its log is `fabric\run\logs\latest.log`.
+
+**Making a release:** `powershell -ExecutionPolicy Bypass -File tools\package-sb.ps1` builds both
+halves and writes the zips to `dist\` (the release zip, its debug symbols, and the Minecraft mod's
+jar on its own).
 
 ## Known issues
 
@@ -170,6 +203,8 @@ Gradle when the game starts Minecraft.
 - Flying very fast into a new area holds you back for a moment while its walls and floors are
   scanned.
 - DirectX 12 isn't supported (use `-dx11`).
+- Minecraft runs with Security Breach and closes with it; starting Minecraft alone doesn't start the
+  game.
 
 ## Layout
 

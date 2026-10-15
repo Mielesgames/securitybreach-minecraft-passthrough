@@ -91,6 +91,7 @@ public final class SkyClient {
 	public static void beginFrame() {
 		SkyLink.poll();
 		quitWithSkyrim(Minecraft.getInstance());
+		startGameIfAlone();
 		if (START_HIDDEN && !startedHidden) {
 			startedHidden = true;
 			Minecraft minecraft = Minecraft.getInstance();
@@ -176,6 +177,29 @@ public final class SkyClient {
 	private static final long NEVER_CONNECTED_QUIT_MS = 10 * 60 * 1000;
 	private static final long STARTED_AT = System.currentTimeMillis();
 	private static boolean gaveUpWaiting;
+
+	/**
+	 * Minecraft started on its own (not by Security Breach): after a few seconds without the game,
+	 * Steam starts it (app 747660), which then takes this Minecraft over. -Dskycraft.startGame=false
+	 * leaves it alone.
+	 */
+	private static boolean gameStartAsked;
+
+	private static void startGameIfAlone() {
+		if (!PASSTHROUGH || gameStartAsked || System.currentTimeMillis() - STARTED_AT < 8000) {
+			return;
+		}
+		gameStartAsked = true;
+		if (SkyLink.skyrimPid() != 0 || !Boolean.parseBoolean(System.getProperty("skycraft.startGame", "true"))) {
+			return;
+		}
+		try {
+			new ProcessBuilder("cmd", "/c", "start", "", "steam://rungameid/747660").start();
+			SkyCraft.LOG.info("FNAFSBCraft: Minecraft was started on its own; starting Security Breach through Steam");
+		} catch (Exception e) {
+			SkyCraft.LOG.warn("FNAFSBCraft: couldn't start Security Breach through Steam", e);
+		}
+	}
 
 	private static void quitWithSkyrim(Minecraft minecraft) {
 		int pid = SkyLink.skyrimPid();
