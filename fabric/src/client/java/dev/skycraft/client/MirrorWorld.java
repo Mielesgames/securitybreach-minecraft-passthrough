@@ -100,6 +100,156 @@ public final class MirrorWorld {
 			minecraft.gui.hud.getChat().addClientSystemMessage(net.minecraft.network.chat.Component.literal(pendingNote));
 			pendingNote = null;
 		}
+		// The save was named while a world was still loading (so nothing was left then):
+		// once it is open, to the save's own world (15 Oct: Steve never came).
+		if (hostSave != null && minecraft.level != null && minecraft.player != null && sessionJoin == null && !wanted.equals(opened)) {
+			SkyCraft.LOG.info("FNAFSBCraft: world {} is open but the save {} has {}, switching", opened, hostSave, wanted);
+			leaveWorld(minecraft);
+		}
+	}
+
+	// ---- a Minecraft world per Security Breach save ----
+	// The host names the loaded save (FNAFSaveGameSystem.SaveSlotName). Each save gets a world of its
+	// own, kept in fnafsbcraft_saves.txt ("save<TAB>world folder"). The world that was there before
+	// (one shared by every save) goes to the first save loaded; New Game on a save starts a fresh
+	// world for it (the old one is kept on disk).
+
+	/** The world folder to be in; the one opened last. */
+	private static String wanted = SkyCraft.WORLD_NAME;
+	private static @org.jspecify.annotations.Nullable String opened;
+	private static @org.jspecify.annotations.Nullable String hostSave;
+	private static java.util.@org.jspecify.annotations.Nullable LinkedHashMap<String, String> saves;
+
+	private static java.nio.file.Path savesFile() {
+		return net.fabricmc.loader.api.FabricLoader.getInstance().getGameDir().resolve("fnafsbcraft_saves.txt");
+	}
+
+	private static java.util.LinkedHashMap<String, String> saves() {
+		if (saves == null) {
+			saves = new java.util.LinkedHashMap<>();
+			try {
+				if (java.nio.file.Files.exists(savesFile())) {
+					for (String line : java.nio.file.Files.readAllLines(savesFile())) {
+						int tab = line.indexOf('\t');
+						if (tab > 0 && !line.startsWith("#")) {
+							saves.put(line.substring(0, tab), line.substring(tab + 1));
+						}
+					}
+				}
+			} catch (Exception e) {
+				SkyCraft.LOG.warn("FNAFSBCraft: couldn't read {}", savesFile(), e);
+			}
+		}
+		return saves;
+	}
+
+	private static void writeSaves() {
+		var lines = new java.util.ArrayList<String>();
+		lines.add("# FNAFSBCraft: which Minecraft world belongs to which Security Breach save (save<TAB>world folder)");
+		saves().forEach((save, world) -> lines.add(save + "\t" + world));
+		try {
+			java.nio.file.Files.write(savesFile(), lines);
+		} catch (Exception e) {
+			SkyCraft.LOG.warn("FNAFSBCraft: couldn't write {}", savesFile(), e);
+		}
+	}
+
+	/**
+	 * The play was saved into another slot: the open world goes on with it (the new slot gets
+	 * it), and the slot before keeps a copy of how it is now. A world the new slot had before
+	 * stays on disk.
+	 */
+	private static void savedInto(Minecraft minecraft, String before, String save) {
+		var map = saves();
+		String current = opened;
+		String stem = SkyCraft.WORLD_NAME + " " + before.replaceAll("[^A-Za-z0-9_ -]", "_");
+		String copy = stem;
+		for (int n = 2; map.containsValue(copy) || minecraft.getLevelSource().levelExists(copy); n++) {
+			copy = stem + " " + n;
+		}
+		map.put(save, current);
+		map.put(before, copy);
+		writeSaves();
+		wanted = current;
+		var server = minecraft.getSingleplayerServer();
+		var from = minecraft.getLevelSource().getLevelPath(current);
+		var to = minecraft.getLevelSource().getLevelPath(copy);
+		final String copyName = copy;
+		Runnable copyWorld = () -> {
+			try (var files = java.nio.file.Files.walk(from)) {
+				for (var file : (Iterable<java.nio.file.Path>) files::iterator) {
+					var target = to.resolve(from.relativize(file).toString());
+					if (java.nio.file.Files.isDirectory(file)) {
+						java.nio.file.Files.createDirectories(target);
+					} else if (!file.getFileName().toString().equals("session.lock")) {
+						java.nio.file.Files.copy(file, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+					}
+				}
+				SkyCraft.LOG.info("FNAFSBCraft: saved into {}: world {} goes along, {} keeps a copy ({})", save, current, before, copyName);
+			} catch (Exception e) {
+				SkyCraft.LOG.warn("FNAFSBCraft: couldn't copy world {} for {}", current, before, e);
+			}
+		};
+		if (server != null) {
+			// Everything on disk first, then copied.
+			server.execute(() -> {
+				server.saveEverything(true, true, true);
+				copyWorld.run();
+			});
+		} else {
+			copyWorld.run();
+		}
+	}
+
+	/** True for the mod's own worlds (no backup prompt for them). */
+	public static boolean isOurs(String levelId) {
+		return levelId.equals(SkyCraft.WORLD_NAME) || levelId.startsWith(SkyCraft.WORLD_NAME + " ");
+	}
+
+	/** True once the world of the save the host named is open (or no save was named yet). */
+	public static boolean slotReady(Minecraft minecraft) {
+		return hostSave == null || (minecraft.level != null && wanted.equals(opened));
+	}
+
+	/**
+	 * The host loaded a save (how 0), started one with New Game (1), or saved the play into
+	 * another slot (2): to its world.
+	 */
+	public static void hostSave(Minecraft minecraft, String save, int how) {
+		boolean newGame = how == 1;
+		var map = saves();
+		String before = hostSave;
+		boolean changed = !save.equals(hostSave) || newGame;
+		hostSave = save;
+		if (!changed) {
+			return;
+		}
+		if (how == 2 && before != null && opened != null && minecraft.level != null) {
+			savedInto(minecraft, before, save);
+			return;
+		}
+		String world = map.get(save);
+		if (newGame || world == null) {
+			String current = opened != null ? opened : SkyCraft.WORLD_NAME;
+			if (!newGame && !map.containsValue(current)) {
+				// The world from before: it goes to the first save loaded.
+				world = current;
+			} else {
+				String stem = SkyCraft.WORLD_NAME + " " + save.replaceAll("[^A-Za-z0-9_ -]", "_");
+				world = stem;
+				for (int n = 2; map.containsValue(world) || minecraft.getLevelSource().levelExists(world); n++) {
+					world = stem + " " + n;
+				}
+			}
+			map.put(save, world);
+			writeSaves();
+		}
+		SkyCraft.LOG.info("FNAFSBCraft: Security Breach save {}{} -> world {}", save, newGame ? " (New Game)" : "", world);
+		wanted = world;
+		if (!world.equals(opened) && minecraft.level != null && sessionJoin == null) {
+			SkyCraft.LOG.info("FNAFSBCraft: leaving world {} for {}", opened, world);
+			leaveWorld(minecraft);
+		}
 	}
 
 	public static void openWhenReady(Minecraft minecraft) {
@@ -143,21 +293,22 @@ public final class MirrorWorld {
 				new net.minecraft.client.multiplayer.ServerData("FNAFSBCraft", join, net.minecraft.client.multiplayer.ServerData.Type.OTHER), false, null);
 			return;
 		}
-		if (minecraft.getLevelSource().levelExists(SkyCraft.WORLD_NAME)) {
-			SkyCraft.LOG.info("FNAFSBCraft: opening mirror world");
-			minecraft.createWorldOpenFlows().openWorld(SkyCraft.WORLD_NAME, () -> minecraft.gui.setScreen(title));
+		opened = wanted;
+		if (minecraft.getLevelSource().levelExists(wanted)) {
+			SkyCraft.LOG.info("FNAFSBCraft: opening mirror world {}", wanted);
+			minecraft.createWorldOpenFlows().openWorld(wanted, () -> minecraft.gui.setScreen(title));
 			return;
 		}
-		SkyCraft.LOG.info("FNAFSBCraft: creating mirror world");
+		SkyCraft.LOG.info("FNAFSBCraft: creating mirror world {}", wanted);
 		LevelSettings settings = new LevelSettings(
-			SkyCraft.WORLD_NAME,
+			wanted,
 			GameType.SURVIVAL,
 			new LevelSettings.DifficultySettings(Difficulty.NORMAL, false, false),
 			true,
 			WorldDataConfiguration.DEFAULT
 		);
 		minecraft.createWorldOpenFlows().createFreshLevel(
-			SkyCraft.WORLD_NAME,
+			wanted,
 			settings,
 			new WorldOptions(0L, false, false),
 			registries -> registries.lookupOrThrow(Registries.WORLD_PRESET).getOrThrow(PRESET).value().createWorldDimensions(),

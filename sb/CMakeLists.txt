@@ -5,6 +5,7 @@ add_library(${TARGET} SHARED
     src/Actors.cpp
     src/Collision.cpp
     src/Input.cpp
+    src/Launcher.cpp
     src/Link.cpp
     src/Overlay.cpp
     src/World.cpp

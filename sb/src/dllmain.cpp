@@ -21,6 +21,8 @@
 #include "Actors.h"
 #include "Collision.h"
 #include "Input.h"
+#include "Launcher.h"
+#include <thread>
 #include "Link.h"
 #include "Overlay.h"
 #include "World.h"
@@ -167,6 +169,8 @@ static constexpr ULONGLONG kSameHitMs = 400;
 
 // EMovementMode.
 static constexpr std::uint8_t kMoveFalling = 3;
+// UE's MOVE_Walking.
+static constexpr std::uint8_t kMoveWalking = 1;
 static constexpr std::uint8_t kMoveFlying = 5;
 static double sb_to_mc_x(double x)
 {
@@ -433,6 +437,8 @@ public:
     };
 
     std::vector<Present> present;
+    // Names whose last one went, and when ("left the game" waits 10 s).
+    std::map<std::wstring, ULONGLONG> leaving;
     RC::Unreal::UObject* roster_player = nullptr;
     bool roster_taken = false;
     ULONGLONG roster_tick = 0;
@@ -639,6 +645,43 @@ public:
     ULONGLONG playable_since = 0;
     // Minecraft mode went off because Gregory went into a hiding spot.
     bool back_after_hiding = false;
+    // The game has the player (Gregory inside Freddy in the intro, the boot
+    // screen, a cutscene): Minecraft mode waits, and comes back afterwards.
+    bool back_after_game = false;
+    bool look_ignored_logged = false;
+    ULONGLONG game_free_since = 0;
+    ULONGLONG gregory_inside_tick = 0;
+    // Freddy's own camera, moved for F5 while riding, and where it was.
+    RC::Unreal::FWeakObjectPtr freddy_cam;
+    float freddy_cam_location[3]{};
+    float freddy_cam_rotation[3]{};
+
+    // Where Minecraft's feet were last frame (Unreal units), for the wall check.
+    double wall_prev[3]{};
+    bool wall_prev_valid = false;
+    ULONGLONG wall_logged = 0;
+
+    // The Security Breach save that is loaded (FNAFSaveGameSystem.SaveSlotName):
+    // Minecraft keeps a world per save. New Game on a slot starts a fresh one.
+    RC::Unreal::FWeakObjectPtr save_system;
+    std::wstring save_slot;
+    RC::Unreal::FWeakObjectPtr save_slot_gregory;
+    ULONGLONG levels_tick = 0;
+    // Whether Gregory (Steve) is in one of the game's rooms, and the last
+    // floor spot that was: the map is held there when the game unloads it
+    // under a Steve who is outside every room (on top of a vent, 15 Oct).
+    bool player_in_room = true;
+    double room_point[3]{};
+    bool have_room_point = false;
+    bool unload_guard = false;
+    // Steve crawls (a vent): the map is held at the room he crawled in from.
+    bool stream_crawling = false;
+    bool vent_pin_logged = false;
+    std::int32_t levels_seen = -1;
+    ULONGLONG save_slot_tick = 0;
+    ULONGLONG save_slot_sent_tick = 0;
+    bool save_hooks_set = false;
+    static inline std::atomic<bool> s_new_game{ false };
     // The seat Minecraft gives Steve in a hiding spot: when it was asked
     // for, whether he has sat on it, and whether he already asked to leave.
     ULONGLONG hide_seat_tick = 0;
@@ -894,11 +937,53 @@ public:
         }
     }
 
+    // The mod's own folder (Mods\SecurityBreachMinecraftPassthrough): two up from dlls\main.dll.
+    static auto mod_folder() -> std::filesystem::path
+    {
+        HMODULE module = nullptr;
+
+        ::GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&mod_folder),
+            &module
+        );
+
+        wchar_t path[MAX_PATH * 2]{};
+
+        ::GetModuleFileNameW(module, path, static_cast<DWORD>(std::size(path)));
+
+        return std::filesystem::path(path).parent_path().parent_path();
+    }
+
     auto start_minecraft() -> void
     {
         if (minecraft_launch_started)
         {
             return;
+        }
+
+        // A release: the Minecraft it ships (Prism Launcher, FNAFSBCraft-Minecraft.zip in the
+        // mod's folder). A build from source (SBMP_FABRIC_DIR set, or no bundle) runs the fabric
+        // project with gradlew, below.
+        {
+            wchar_t dev_dir[8]{};
+            const bool from_source = ::GetEnvironmentVariableW(L"SBMP_FABRIC_DIR", dev_dir, static_cast<DWORD>(std::size(dev_dir))) > 0;
+            const auto bundle = sbmp::launcher::bundle_next_to(mod_folder());
+
+            if (!from_source && !bundle.empty())
+            {
+                minecraft_launch_started = true;
+
+                if (sbmp::launcher::minecraft_running())
+                {
+                    RC::Output::send<RC::LogLevel::Default>(STR("SBMP launcher: Minecraft is running already\n"));
+                    return;
+                }
+
+                // Unpacking takes a moment: not on the game's thread.
+                std::thread([bundle] { sbmp::launcher::start_bundled(bundle); }).detach();
+                return;
+            }
         }
 
         if (minecraft_job == nullptr)
@@ -1206,10 +1291,25 @@ public:
         // Minecraft has to be in its world, and the game has to be playing:
         // on a loading screen or in a cutscene Gregory isn't the player's yet,
         // and taking him over there ended the game once.
+        update_save_slot(now);
+
+        // Minecraft has to have this save's world open (it switches worlds
+        // when another save is loaded).
+        const bool slot_ready =
+            save_slot.empty() || (have_mc_state && (mc_state.flags & skycraft::proto::kMcSlotReady) != 0);
+
+        if (minecraft_mode && have_mc_state && !slot_ready)
+        {
+            minecraft_mode = false;
+            f6_waiting = true;
+            RC::Output::send<RC::LogLevel::Default>(STR("SBMP saves: Minecraft is opening the world of {}, Minecraft mode waits for it\n"), save_slot);
+        }
+
         const bool minecraft_ready =
             have_mc_state &&
             (mc_state.flags & skycraft::proto::kMcInWorld) != 0 &&
-            game_playable;
+            game_playable &&
+            slot_ready;
 
         // F6 pressed while Minecraft was still starting: it counts once
         // Minecraft is in its world (F6 again cancels).
@@ -1232,6 +1332,26 @@ public:
             else
             {
                 f6_waiting = false;
+
+                // Crawling (a vent): Gregory, handed back here, stood half in its
+                // floor and Unreal pushed him through it (15 Oct). F6 waits
+                // until Steve is out.
+                if (minecraft_mode && !waiting_f6_now_ready && have_mc_state && mc_state.eyeY - mc_state.y < 1.0)
+                {
+                    say_in_chat(L"Crawl out of here first: Gregory can't take over in a vent.", false);
+                    RC::Output::send<RC::LogLevel::Default>(STR("SBMP F6 ignored: Steve is crawling\n"));
+                    f6_was_down = f6_down;
+                    return;
+                }
+
+                if (back_after_game && !waiting_f6_now_ready)
+                {
+                    back_after_game = false;
+                    steve_wanted = false;
+                    RC::Output::send<RC::LogLevel::Default>(STR("SBMP Minecraft mode: OFF (it won't come back after the game's scene)\n"));
+                    f6_was_down = f6_down;
+                    return;
+                }
 
                 if (back_after_hiding)
                 {
@@ -1332,8 +1452,23 @@ public:
 
         auto* controller = find_controller();
 
+        // No player controller: the title screen (after Quit to Title, or the
+        // end portal's ending). Nothing of Minecraft's over it (it stayed, 15 Oct).
         if (controller == nullptr)
         {
+            overlay::state().show.store(false, std::memory_order_relaxed);
+            overlay::state().crosshair.store(false, std::memory_order_relaxed);
+            driving = false;
+
+            // And the keys and mouse are the menu's.
+            input::update(
+                g_link,
+                overlay::state().window.load(std::memory_order_relaxed),
+                false,
+                false,
+                overlay::state().viewport_w.load(std::memory_order_relaxed),
+                overlay::state().viewport_h.load(std::memory_order_relaxed)
+            );
             return;
         }
 
@@ -1417,10 +1552,15 @@ public:
             move_input_ignored = false;
         }
 
-        if (move_input_ignored != minecraft_mode)
+        // Riding Freddy the mod's own block is lifted, so the controller's
+        // "move input ignored" is the game's alone (a scene walking him or
+        // holding him still), and the ride respects it.
+        const bool ignore_moves = minecraft_mode && !riding_freddy;
+
+        if (move_input_ignored != ignore_moves)
         {
-            move_input_ignored = minecraft_mode;
-            set_ignore_move_input(controller, minecraft_mode);
+            move_input_ignored = ignore_moves;
+            set_ignore_move_input(controller, ignore_moves);
         }
 
         const std::uintptr_t controller_address =
@@ -1477,6 +1617,20 @@ public:
             if (auto* inside = gregory_ref.Get())
             {
                 first_person_character = inside;
+
+                // The game took him out of Freddy itself (Freddy put him down in a
+                // scene): to the mod he still sat inside, and the game thought so
+                // too (15 Oct). Out of the ride as well, Minecraft's mule included.
+                auto* still_in = inside->GetValuePtrByPropertyNameInChain<bool>(STR("IsHiding"));
+
+                if (still_in != nullptr && !*still_in && ::GetTickCount64() - gregory_inside_tick > 1500)
+                {
+                    gregory_inside = false;
+                    g_link.push_input(skycraft::proto::kInMountFreddy, 1);
+                    request_sync(STR("Freddy let Gregory out"));
+
+                    RC::Output::send<RC::LogLevel::Default>(STR("SBMP ride: the game took Gregory out of Freddy, Steve gets off\n"));
+                }
             }
         }
 
@@ -1492,6 +1646,8 @@ public:
         if (first_person_character == nullptr)
         {
             driving = false;
+            overlay::state().show.store(false, std::memory_order_relaxed);
+            overlay::state().crosshair.store(false, std::memory_order_relaxed);
 
             if (!no_character_logged)
             {
@@ -1557,13 +1713,113 @@ public:
             }
         }
 
+        // The game has the player itself: Gregory sits in Freddy (the intro,
+        // "Exit Freddy" with E), or the camera looks from something else (the
+        // boot screen, a cutscene). Seen 15 Oct: Minecraft mode came on at
+        // the boot screen and then drove Freddy, and E never reached the game.
+        // Not while Steve rides Freddy (that is ours) or hides (handled below).
+        {
+            auto* in_hiding = first_person_character->GetValuePtrByPropertyNameInChain<bool>(STR("IsHiding"));
+            auto* moving = first_person_character->GetValuePtrByPropertyNameInChain<bool>(STR("Hide/UnhideTransitionActive"));
+            // The game puts Gregory in Freddy (he picks him up and walks, 15 Oct):
+            // to the game that is hiding too, but in Freddy, not a hiding spot.
+            const bool in_freddy_by_game = !gregory_inside && hiding_in_freddy(first_person_character);
+            const bool hiding = !in_freddy_by_game &&
+                ((in_hiding != nullptr && *in_hiding) || (moving != nullptr && *moving) || back_after_hiding);
+
+            RC::Unreal::UObject* viewed = nullptr;
+            const bool camera_elsewhere =
+                call_getter(controller, STR("GetViewTarget"), viewed) && viewed != nullptr && viewed != first_person_character;
+            // An automatic scene of the game (Freddy carrying Gregory to the first
+            // aid station, 15 Oct) takes the look input away: then everything is
+            // the game's, also while Steve rides Freddy.
+            bool look_ignored = false;
+
+            call_getter(controller, STR("IsLookInputIgnored"), look_ignored);
+
+            if (look_ignored != look_ignored_logged)
+            {
+                look_ignored_logged = look_ignored;
+                RC::Output::send<RC::LogLevel::Default>(STR("SBMP the game {} the look input\n"), look_ignored ? STR("took") : STR("gave back"));
+            }
+
+            const bool games_own =
+                in_freddy_by_game ||
+                (!hiding && (look_ignored || (!gregory_inside && (!is_gregory(first_person_character) || camera_elsewhere))));
+
+            if (games_own && minecraft_mode)
+            {
+                minecraft_mode = false;
+                back_after_game = true;
+                driving = false;
+
+                RC::Output::send<RC::LogLevel::Default>(
+                    STR("SBMP the game has the player ({}, camera on {}): Minecraft mode waits\n"),
+                    first_person_character->GetFullName(),
+                    viewed != nullptr ? viewed->GetFullName() : STR("nothing")
+                );
+            }
+            else if (games_own)
+            {
+                game_free_since = 0;
+            }
+            else if (!games_own && back_after_game && game_free_since == 0)
+            {
+                // The game finishes a scene with a turn of its own (towards
+                // where Chica came from, 15 Oct); taken back at once, the view
+                // stayed stuck. A moment for it first.
+                game_free_since = now;
+            }
+            else if (!games_own && back_after_game && now - game_free_since > 1500)
+            {
+                game_free_since = 0;
+                back_after_game = false;
+                minecraft_mode = true;
+                watch_tick = now;
+                request_sync(STR("the game's scene is over"));
+
+                // A short camera takeover (Chica, 15 Oct) left the view locked
+                // after it: the game frees it on its own way out, which is
+                // skipped here. Free looking again, and the look input too.
+                if (auto* manager = controller->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("PlayerCameraManager")); manager != nullptr && *manager != nullptr)
+                {
+                    const std::pair<const wchar_t*, float> limits[] = {
+                        { STR("ViewPitchMin"), -89.9f }, { STR("ViewPitchMax"), 89.9f },
+                        { STR("ViewYawMin"), 0.0f }, { STR("ViewYawMax"), 359.999f },
+                        { STR("ViewRollMin"), -89.9f }, { STR("ViewRollMax"), 89.9f },
+                    };
+
+                    for (const auto& [name, value] : limits)
+                    {
+                        if (auto* limit = (*manager)->GetValuePtrByPropertyNameInChain<float>(name))
+                        {
+                            *limit = value;
+                        }
+                    }
+                }
+
+                if (auto* reset = controller->GetFunctionByNameInChain(STR("ResetIgnoreLookInput")))
+                {
+                    alignas(16) std::uint8_t no_params[16]{};
+
+                    controller->ProcessEvent(reset, no_params);
+                }
+
+                RC::Output::send<RC::LogLevel::Default>(STR("SBMP the game let go of the player: Minecraft mode is back\n"));
+            }
+        }
+
         // A hiding spot (locker, under a table): the game moves Gregory in and
         // out of it and he leaves with its own key, so while he hides it is
         // plain Security Breach. Minecraft mode comes back when he is out.
         {
             auto* in_hiding = first_person_character->GetValuePtrByPropertyNameInChain<bool>(STR("IsHiding"));
             auto* moving = first_person_character->GetValuePtrByPropertyNameInChain<bool>(STR("Hide/UnhideTransitionActive"));
-            const bool hiding = (in_hiding != nullptr && *in_hiding) || (moving != nullptr && *moving);
+            // Inside Freddy counts as hiding to the game; when Steve rides him
+            // that is the mod's own doing, not a hiding spot (it threw him off
+            // after three seconds, 15 Oct).
+            const bool hiding = !gregory_inside && !hiding_in_freddy(first_person_character) &&
+                ((in_hiding != nullptr && *in_hiding) || (moving != nullptr && *moving));
 
             if (hiding && minecraft_mode)
             {
@@ -1689,7 +1945,10 @@ public:
         // to let go of Gregory entirely: no movement mode at all. ("Flying"
         // still pushed him out of the game's floor and walls when Steve stood
         // in a hole dug into them, and the camera jumped up with him.)
-        const bool flying = minecraft_mode && driving;
+        // Also while Minecraft is being brought to him (a sync): with Unreal's
+        // gravity back on, Gregory fell on his own where the map wasn't loaded,
+        // into the void, again and again (vent, 15 Oct).
+        const bool flying = minecraft_mode;
 
         if (flying != flying_applied)
         {
@@ -1832,6 +2091,9 @@ public:
         stream_mc_feet[0] = mc_state.x;
         stream_mc_feet[1] = mc_state.y;
         stream_mc_feet[2] = mc_state.z;
+        // Crawling: Minecraft's eye under a block above its feet (a vent).
+        stream_crawling = minecraft_mode && mc_state.eyeY - mc_state.y < 1.0;
+        rescan_on_streaming(controller, mc_state.x, mc_state.y, mc_state.z);
         holds_pumpkin = (mc_state.flags & skycraft::proto::kMcHoldsPumpkin) != 0;
         held_token = mc_state.heldToken;
 
@@ -1989,6 +2251,8 @@ public:
 
         if (!driving)
         {
+            wall_prev_valid = false;
+
             // Minecraft still stands where it was before the sync (or is
             // gliding towards Gregory). Following it now would yank Gregory
             // back through walls, so wait until it has really arrived.
@@ -2032,12 +2296,103 @@ public:
             return;
         }
 
+        // A safety net under Minecraft's collision: did Steve just pass through
+        // a wall of the game (a region scanned before the room was there, a
+        // gap between cells)? A ray of the game's own, from where he was to
+        // where he is, at waist and head height. If it hits, Minecraft goes
+        // back to Gregory, who is still where Steve was. Not in a hole dug
+        // into the game (those walls are meant to be gone), nor in spectator.
+        {
+            const double feet_z = mc_to_sb_y(mc_state.y);
+            const double eye_above = std::max(20.0, mc_to_sb_y(mc_state.eyeY) - feet_z);
+            const int bx = static_cast<int>(std::floor(mc_state.x));
+            const int by = static_cast<int>(std::floor(mc_state.y + 0.1));
+            const int bz = static_cast<int>(std::floor(mc_state.z));
+            bool near_hole = false;
+
+            for (int dy = -1; dy <= 2 && !near_hole; ++dy)
+            {
+                for (int dz = -1; dz <= 1 && !near_hole; ++dz)
+                {
+                    for (int dx = -1; dx <= 1 && !near_hole; ++dx)
+                    {
+                        near_hole = world::dug_at(bx + dx, by + dy, bz + dz);
+                    }
+                }
+            }
+
+            // Not while crawling either: in a vent's round pipe the rays brushed its
+            // walls and Steve was sent back again and again (15 Oct).
+            const bool crawling = mc_state.eyeY - mc_state.y < 1.0;
+            const bool check =
+                wall_prev_valid && !near_hole && !crawling && (mc_state.flags & skycraft::proto::kMcSpectator) == 0;
+
+            if (check)
+            {
+                const double mx = sb_x - wall_prev[0];
+                const double my = sb_y - wall_prev[1];
+                const double mz = feet_z - wall_prev[2];
+                const double moved = std::sqrt(mx * mx + my * my + mz * mz);
+
+                if (moved > 1.0 && moved < kMaxStep)
+                {
+                    // Both rays have to cross it: a whole wall. One alone (a ledge, a
+                    // rail, an edge Steve brushed) set him back again and again in a
+                    // hallway under the stage (15 Oct).
+                    RC::Unreal::UObject* wall = nullptr;
+                    double above = 0.0;
+                    int crossed = 0;
+
+                    for (const double height : { std::min(63.0, eye_above * 0.5), eye_above - 7.0 })
+                    {
+                        const double from[3]{ wall_prev[0], wall_prev[1], wall_prev[2] + height };
+                        const double to[3]{ sb_x, sb_y, feet_z + height };
+                        auto* hit = collision::trace(first_person_character, from, to, 0.0);
+
+                        // Characters are Minecraft's to bump into, not walls; an open
+                        // door's lingering blockers aren't walls either.
+                        if (hit == nullptr || hit->GetFunctionByNameInChain(STR("GetController")) != nullptr || collision::is_open_door(hit))
+                        {
+                            continue;
+                        }
+
+                        wall = hit;
+                        above = height;
+                        ++crossed;
+                    }
+
+                    if (crossed == 2)
+                    {
+                        if (now - wall_logged > 2000)
+                        {
+                            wall_logged = now;
+                            RC::Output::send<RC::LogLevel::Default>(
+                                STR("SBMP wall: Steve went through {} ({} units above his feet), back he goes\n"),
+                                wall->GetFullName(),
+                                above
+                            );
+                        }
+
+                        wall_prev_valid = false;
+                        request_sync(STR("walked through a wall of the game"));
+                        return;
+                    }
+                }
+            }
+
+            wall_prev[0] = sb_x;
+            wall_prev[1] = sb_y;
+            wall_prev[2] = feet_z;
+            wall_prev_valid = true;
+        }
+
         // Minecraft only knows the geometry that has been scanned. Where it
         // doesn't, its player falls through the floor.
         const bool supported =
             (mc_state.flags & (
                 skycraft::proto::kMcOnGround | skycraft::proto::kMcFlying | skycraft::proto::kMcSwimming |
-                skycraft::proto::kMcRidingHost  // in the saddle: it is the mule that stands on the ground
+                skycraft::proto::kMcRidingHost |  // in the saddle: it is the mule that stands on the ground
+                skycraft::proto::kMcRiding        // in a boat or minecart: carried (Steve was left behind after 3 s, 15 Oct)
             )) != 0;
 
         if (supported)
@@ -2077,9 +2432,13 @@ public:
             }
             have_eye_above_actor = true;
 
+            // Never lower than Gregory standing on Steve's floor: crawling (eye
+            // 0.4 block up) put him under a vent's floor, the game saw him in no
+            // room at all and unloaded the map (15 Oct). The camera then sits a
+            // little higher than a crawling Steve's eye.
             eye_shift = std::clamp(
                 mc_to_sb_y(mc_state.eyeY) - eye_above_actor - sb_z,
-                -150.0,
+                std::max(-150.0, 15.0 - half_height),
                 150.0
             );
         }
@@ -2108,6 +2467,17 @@ public:
         if (!attack && !use && !repeat)
         {
             return;
+        }
+
+        // Riding Freddy, the camera is in him: his own body is "self" for the
+        // rays (a right click asked the game to use Freddy and was eaten, so the
+        // bow didn't draw, 15 Oct).
+        if (gregory_inside)
+        {
+            if (auto* mount = freddy.Get())
+            {
+                character = mount;
+            }
         }
 
         if (!driving || !view.valid)
@@ -2395,6 +2765,13 @@ public:
 
             auto* who = collision::trace(character, view.position, far_end, kAttackThickness);
 
+            // Unless the game offers something on him (the Fazwatch in his chest).
+            if (who != nullptr && who->GetFunctionByNameInChain(STR("GetController")) != nullptr && is_freddy(who) && game_interact(character))
+            {
+                input::consume_use_click();
+                return;
+            }
+
             if (who != nullptr && who->GetFunctionByNameInChain(STR("GetController")) != nullptr && is_freddy(who))
             {
                 const auto at = reinterpret_cast<RC::Unreal::AActor*>(who)->K2_GetActorLocation();
@@ -2509,10 +2886,50 @@ public:
         {
             input::consume_use_click();
         }
+        else if (game_interact(character))
+        {
+            input::consume_use_click();
+        }
         else
         {
             input::forward_use_click();
         }
+    }
+
+    // What the game itself offers right now ("Hold E Collect" on the Fazwatch
+    // in Freddy's chest): things a trace can't reach, as they have no
+    // collision of their own. The game keeps it in Gregory's interact
+    // component (ClosestInteractible); that object is used the mod's way.
+    // Nothing offered: the click is Minecraft's (a bow, a book, a block;
+    // checking the prompt widget instead took every click, 15 Oct). A
+    // character offered (Freddy's "Enter") is left alone: that is the ride.
+    auto game_interact(RC::Unreal::UObject* character) -> bool
+    {
+        auto* component = character->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("PlayerInteractComponent"));
+
+        if (component == nullptr || *component == nullptr)
+        {
+            return false;
+        }
+
+        auto* closest = (*component)->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("ClosestInteractible"));
+
+        if (closest == nullptr || *closest == nullptr || (*closest)->GetFunctionByNameInChain(STR("GetController")) != nullptr)
+        {
+            return false;
+        }
+
+        auto* target = *closest;
+        auto* controller = find_controller();
+
+        if (controller == nullptr || !use_object(target, character, controller))
+        {
+            RC::Output::send<RC::LogLevel::Default>(STR("SBMP use: the game offers {}, but it couldn't be used\n"), target->GetFullName());
+            return false;
+        }
+
+        RC::Output::send<RC::LogLevel::Default>(STR("SBMP use: what the game offered ({})\n"), target->GetFullName());
+        return true;
     }
 
     // Doors open and close like Minecraft doors, locked or not. Anything
@@ -3243,12 +3660,108 @@ public:
     }
 
     // Opens or closes one of the game's doors for good, lock or no lock.
-    // Whether the game keeps this door locked for Gregory (BP_DoorMaster's IsDoorLockedForPlayer).
+    // Whether the game keeps this door shut for Gregory: locked
+    // (IsDoorLockedForPlayer), or asking for a security level or a key he
+    // doesn't have (the door component's NormalDoorEntryRequirements, asked
+    // of the game's inventory: HasSecurityClearance, HasItem). Doors whose
+    // condition counts from one side only are left to the lock (going out
+    // the other way is allowed in the game).
     static auto door_locked(RC::Unreal::UObject* door) -> bool
     {
         bool locked = false;
 
-        return call_getter(door, STR("IsDoorLockedForPlayer"), locked) && locked;
+        if (call_getter(door, STR("IsDoorLockedForPlayer"), locked) && locked)
+        {
+            return true;
+        }
+
+        auto* component = door->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("Door"));
+        auto* needs = component != nullptr && *component != nullptr
+            ? (*component)->GetValuePtrByPropertyNameInChain<std::uint8_t>(STR("NormalDoorEntryRequirements"))
+            : nullptr;
+
+        if (needs == nullptr)
+        {
+            return false;
+        }
+
+        // FDoorEntryRequirements: RequiredSecurityLevel 0x20, RequiredInventoryItem 0x24, ConditionDirection 0x2C.
+        std::int32_t level = 0;
+        RC::Unreal::FName item{};
+
+        std::memcpy(&level, needs + 0x20, sizeof(level));
+        std::memcpy(static_cast<void*>(&item), needs + 0x24, sizeof(item));
+
+        const bool one_side = needs[0x2C] != 0;
+        const bool wants_item = item.GetComparisonIndex() != 0;
+
+        if (one_side || (level <= 0 && !wants_item))
+        {
+            return false;
+        }
+
+        static RC::Unreal::FWeakObjectPtr inventory_ref;
+        auto* inventory = inventory_ref.Get();
+
+        if (inventory == nullptr)
+        {
+            std::vector<RC::Unreal::UObject*> found;
+
+            RC::Unreal::UObjectGlobals::FindAllOf(STR("FNAFInventorySystem"), found);
+
+            for (auto* candidate : found)
+            {
+                if (candidate != nullptr && candidate->GetName().find(STR("Default__")) == std::wstring::npos)
+                {
+                    inventory = candidate;
+                    inventory_ref = candidate;
+                    break;
+                }
+            }
+        }
+
+        if (inventory == nullptr)
+        {
+            return false;
+        }
+
+        if (level > 0)
+        {
+            if (auto* clearance = inventory->GetFunctionByNameInChain(STR("HasSecurityClearance")))
+            {
+                // (int32 InSecurityLevel) -> bool
+                alignas(16) std::uint8_t params[16]{};
+
+                std::memcpy(params, &level, sizeof(level));
+                inventory->ProcessEvent(clearance, params);
+
+                if (params[4] == 0)
+                {
+                    RC::Output::send<RC::LogLevel::Verbose>(STR("SBMP door: {} needs security level {}\n"), door->GetFullName(), level);
+                    return true;
+                }
+            }
+        }
+
+        if (wants_item)
+        {
+            if (auto* has = inventory->GetFunctionByNameInChain(STR("HasItem")))
+            {
+                // (FName searchItem) -> bool
+                alignas(16) std::uint8_t params[16]{};
+
+                std::memcpy(params, static_cast<void*>(&item), sizeof(item));
+                inventory->ProcessEvent(has, params);
+
+                if (params[8] == 0)
+                {
+                    RC::Output::send<RC::LogLevel::Verbose>(STR("SBMP door: {} needs {}\n"), door->GetFullName(), item.ToString());
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     static auto set_door(RC::Unreal::UObject* target, bool open) -> void
@@ -3667,6 +4180,19 @@ public:
 
         RC::Unreal::UObjectGlobals::FindAllOf(STR("Pawn"), pawns);
 
+        for (auto it = leaving.begin(); it != leaving.end();)
+        {
+            if (tick - it->second > 10000)
+            {
+                say_in_chat(it->first + L" left the game", true);
+                it = leaving.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+
         for (auto it = present.begin(); it != present.end();)
         {
             auto* object = it->object.Get();
@@ -3677,10 +4203,12 @@ public:
 
                 it = present.erase(it);
 
-                // Left when the last one of that name is gone (there are many Endos).
+                // Left when the last one of that name is gone (there are many Endos),
+                // and stays gone for a while: the game drops some and makes them
+                // again (Vanessa, every second, 15 Oct).
                 if (std::none_of(present.begin(), present.end(), [&name](const Present& p) { return p.name == name; }))
                 {
-                    say_in_chat(name + L" left the game", true);
+                    leaving[name] = tick;
                 }
             }
             else
@@ -3708,8 +4236,11 @@ public:
                 continue;
             }
 
-            // Joined when the first one of that name comes.
-            if (roster_taken && std::none_of(present.begin(), present.end(), [&name](const Present& p) { return p.name == name; }))
+            // Joined when the first one of that name comes (not when one that just
+            // left is back).
+            const bool came_back = leaving.erase(name) > 0;
+
+            if (roster_taken && !came_back && std::none_of(present.begin(), present.end(), [&name](const Present& p) { return p.name == name; }))
             {
                 say_in_chat(name + L" joined the game", true);
 
@@ -4528,6 +5059,17 @@ public:
         }
     }
 
+    // Where Gregory "hides" is Freddy (the game's HideLocation): the game put
+    // him in Freddy, which to it is hiding as well.
+    static auto hiding_in_freddy(RC::Unreal::UObject* gregory) -> bool
+    {
+        auto* in_hiding = gregory->GetValuePtrByPropertyNameInChain<bool>(STR("IsHiding"));
+        auto* where = gregory->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("HideLocation"));
+
+        return in_hiding != nullptr && *in_hiding && where != nullptr && *where != nullptr &&
+            lower((*where)->GetClassPrivate()->GetName()).find(L"freddy") != std::wstring::npos;
+    }
+
     // Freddy's own screen bits (his clock, his notifications) aren't Steve's:
     // hidden once a second while Gregory is inside him. His power meter stays.
     auto hide_freddy_hud() -> void
@@ -4705,7 +5247,8 @@ public:
         call_getter(target, STR("GetActorForwardVector"), forward);
 
         const double kDegrees = 3.14159265358979323846 / 180.0;
-        const double turn_yaw = std::atan(preview_mouse[0] / 40.0) * 40.0 * kDegrees;
+        // (Turned the other way, he looked away from the mouse, 15 Oct.)
+        const double turn_yaw = -std::atan(preview_mouse[0] / 40.0) * 40.0 * kDegrees;
         const double turn_pitch = std::atan(preview_mouse[1] / 40.0) * 20.0 * kDegrees;
         const double facing = std::atan2(forward[1], forward[0]) - turn_yaw;
         const double out[2] = { std::cos(facing), std::sin(facing) };
@@ -5092,12 +5635,59 @@ public:
         const int bz = static_cast<int>(std::floor(stream_mc_feet[2]));
         const ULONGLONG tick = ::GetTickCount64();
 
-        // Standing on the game's own floor, not in a hole and not in the air.
-        const bool safe_now =
-            !(minecraft_mode && driving) ||
-            ((stream_mc_flags & skycraft::proto::kMcOnGround) != 0 &&
-             (stream_mc_flags & skycraft::proto::kMcFlying) == 0 &&
-             !world::dug_at(bx, by, bz) && !world::dug_at(bx, by - 1, bz) && !world::dug_at(bx, by + 1, bz));
+        // Only a hole or flying needs the map held: falling (off a ledge, through
+        // a thin floor) goes where the game would load the map itself, and holding
+        // it at the ledge left the room below unloaded, no floor, falling on and
+        // on (15 Oct).
+        const bool in_hole = world::dug_at(bx, by, bz) || world::dug_at(bx, by - 1, bz) || world::dug_at(bx, by + 1, bz);
+        const bool flying = (stream_mc_flags & skycraft::proto::kMcFlying) != 0;
+        const bool on_floor = (stream_mc_flags & skycraft::proto::kMcOnGround) != 0;
+
+        if (player_in_room && on_floor && !in_hole)
+        {
+            room_point[0] = at.X();
+            room_point[1] = at.Y();
+            room_point[2] = at.Z();
+            have_room_point = true;
+        }
+
+        // Crawling through a vent: the game lets Gregory into a vent through a
+        // transition of its own, and keeps the map loaded for him there. Steve
+        // just crawls in, the game sees him in no room and unloaded the map
+        // under him (15 Oct). Held at the room he came from while he crawls.
+        if (stream_crawling && minecraft_mode && driving && have_room_point)
+        {
+            set_relative(*viewpoint, STR("K2_SetWorldLocation"), static_cast<float>(room_point[0]), static_cast<float>(room_point[1]), static_cast<float>(room_point[2]));
+            stream_pinned = true;
+
+            if (!vent_pin_logged)
+            {
+                vent_pin_logged = true;
+                RC::Output::send<RC::LogLevel::Default>(STR("SBMP streaming: Steve crawls, the map stays loaded around the room he came from\n"));
+            }
+
+            return;
+        }
+
+        vent_pin_logged = false;
+
+        // The game unloaded the map under Steve outside every room: held at
+        // the last room spot until he is back in one.
+        if (unload_guard)
+        {
+            if (player_in_room || !(minecraft_mode && driving))
+            {
+                unload_guard = false;
+                RC::Output::send<RC::LogLevel::Default>(STR("SBMP streaming: Steve is in a room again, the map follows him\n"));
+            }
+            else
+            {
+                set_relative(*viewpoint, STR("K2_SetWorldLocation"), static_cast<float>(room_point[0]), static_cast<float>(room_point[1]), static_cast<float>(room_point[2]));
+                stream_pinned = true;
+                return;
+            }
+        }
+        const bool safe_now = !(minecraft_mode && driving) || (!in_hole && !flying);
 
         if (!safe_now)
         {
@@ -5109,10 +5699,14 @@ public:
 
         if (safe)
         {
-            stream_point[0] = at.X();
-            stream_point[1] = at.Y();
-            stream_point[2] = at.Z();
-            stream_safe = true;
+            // Where the map is held later: a spot on the floor, not mid-jump.
+            if (on_floor || !(minecraft_mode && driving))
+            {
+                stream_point[0] = at.X();
+                stream_point[1] = at.Y();
+                stream_point[2] = at.Z();
+                stream_safe = true;
+            }
 
             if (stream_pinned && stream_relative_known)
             {
@@ -5137,7 +5731,7 @@ public:
             stream_pinned = true;
 
             RC::Output::send<RC::LogLevel::Default>(
-                STR("SBMP streaming: Steve is in a hole or in the air, the map stays loaded around ({}, {}, {})\n"),
+                STR("SBMP streaming: Steve is in a hole or flying, the map stays loaded around ({}, {}, {})\n"),
                 stream_point[0],
                 stream_point[1],
                 stream_point[2]
@@ -5339,6 +5933,237 @@ public:
 
             ++it;
         }
+    }
+
+    // A part of the map the game streamed in (or out) changes the walls
+    // around Steve; regions scanned before it was there knew nothing of
+    // them for up to 5 s, and Steve walked through (15 Oct). The world's
+    // level count changes when that happens: scan around him again.
+    auto rescan_on_streaming(RC::Unreal::UObject* controller, double x, double y, double z) -> void
+    {
+        const ULONGLONG tick = ::GetTickCount64();
+
+        if (tick - levels_tick < 250)
+        {
+            return;
+        }
+
+        levels_tick = tick;
+
+        auto* level = controller->GetOuterPrivate();
+        auto* world = level != nullptr ? level->GetOuterPrivate() : nullptr;
+
+        struct RawArray
+        {
+            void* data;
+            std::int32_t count;
+            std::int32_t room;
+        };
+
+        auto* levels = world != nullptr ? world->GetValuePtrByPropertyNameInChain<RawArray>(STR("Levels")) : nullptr;
+
+        if (levels == nullptr)
+        {
+            return;
+        }
+
+        // In a room? (Every quarter second, with the level count.)
+        {
+            std::vector<RC::Unreal::UObject*> rooms;
+
+            RC::Unreal::UObjectGlobals::FindAllOf(STR("RoomAreaBase"), rooms);
+
+            bool inside_any = rooms.empty();
+
+            for (auto* room : rooms)
+            {
+                auto* inside = room != nullptr ? room->GetValuePtrByPropertyNameInChain<bool>(STR("bPlayerIsInRoom")) : nullptr;
+
+                if (inside != nullptr && *inside)
+                {
+                    inside_any = true;
+                    break;
+                }
+            }
+
+            player_in_room = inside_any;
+        }
+
+        // Much of the map went at once while Steve is in no room: the game
+        // lost track of where he is. Hold the map at the last room spot.
+        if (levels_seen >= 0 && levels_seen - levels->count >= 5 && minecraft_mode && driving && !player_in_room && have_room_point && !unload_guard)
+        {
+            unload_guard = true;
+
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP streaming: the game unloaded the map ({} -> {} levels) with Steve outside every room; held at ({}, {}, {})\n"),
+                levels_seen,
+                levels->count,
+                room_point[0],
+                room_point[1],
+                room_point[2]
+            );
+        }
+
+        if (levels_seen >= 0 && levels->count != levels_seen)
+        {
+            collision::invalidate(x, y, z, 16.0);
+
+            // A big part came in (out of a vent into a room that wasn't loaded,
+            // 15 Oct): Minecraft knew empty space there and Steve dropped a bit.
+            // It forgets it, so he waits until the new floor has been scanned.
+            if (levels->count - levels_seen >= 5 && minecraft_mode)
+            {
+                g_link.push_input(
+                    skycraft::proto::kInForgetRegions,
+                    16,
+                    static_cast<std::int32_t>(x * 100.0),
+                    static_cast<std::int32_t>(y * 100.0),
+                    static_cast<std::int32_t>(z * 100.0)
+                );
+            }
+
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP collision: the game streamed the map ({} -> {} levels), scanning around Steve again\n"),
+                levels_seen,
+                levels->count
+            );
+        }
+
+        levels_seen = levels->count;
+    }
+
+    // Which Security Breach save is loaded, told to Minecraft once a second
+    // when it changes (and every 5 s anyway, for a Minecraft that restarted).
+    // New Game is caught on the save system's own SetupNewGame calls.
+    auto update_save_slot(ULONGLONG now) -> void
+    {
+        if (now - save_slot_tick < 1000)
+        {
+            return;
+        }
+
+        save_slot_tick = now;
+
+        if (!save_hooks_set)
+        {
+            save_hooks_set = true;
+
+            for (const auto* path : { STR("/Script/fnaf9.FNAFSaveGameSystem:SetupNewGameOnSlot"), STR("/Script/fnaf9.FNAFSaveGameSystem:SetupNewGame") })
+            {
+                auto* function = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UFunction*>(nullptr, nullptr, path);
+
+                if (function == nullptr)
+                {
+                    RC::Output::send<RC::LogLevel::Default>(STR("SBMP saves: {} not found, New Game won't start a fresh world\n"), path);
+                    continue;
+                }
+
+                RC::Unreal::UObjectGlobals::RegisterHook(
+                    function,
+                    [](RC::Unreal::UnrealScriptFunctionCallableContext&, void*) {},
+                    [](RC::Unreal::UnrealScriptFunctionCallableContext&, void*)
+                    {
+                        s_new_game = true;
+                    },
+                    nullptr
+                );
+            }
+        }
+
+        // Only in a game: on the title screen the save system names a slot
+        // (SaveGameSlot0) before any save is loaded, and that one took the
+        // world from before (15 Oct).
+        if (find_controller() == nullptr)
+        {
+            return;
+        }
+
+        auto* system = save_system.Get();
+
+        if (system == nullptr)
+        {
+            std::vector<RC::Unreal::UObject*> found;
+
+            RC::Unreal::UObjectGlobals::FindAllOf(STR("FNAFSaveGameSystem"), found);
+
+            for (auto* candidate : found)
+            {
+                if (candidate != nullptr && candidate->GetName().find(STR("Default__")) == std::wstring::npos)
+                {
+                    system = candidate;
+                    save_system = candidate;
+                    break;
+                }
+            }
+        }
+
+        if (system == nullptr)
+        {
+            return;
+        }
+
+        struct RawString
+        {
+            const wchar_t* data;
+            std::int32_t count;
+            std::int32_t room;
+        };
+
+        auto* raw = system->GetValuePtrByPropertyNameInChain<RawString>(STR("SaveSlotName"));
+
+        if (raw == nullptr || raw->data == nullptr || raw->count <= 1 || raw->count > 256)
+        {
+            return;
+        }
+
+        const std::wstring slot(raw->data, static_cast<std::size_t>(raw->count - 1));
+        const bool fresh = s_new_game.exchange(false);
+
+        if (slot == save_slot && !fresh && now - save_slot_sent_tick < 5000)
+        {
+            return;
+        }
+
+        // Another slot with the same Gregory still playing: the game was saved
+        // into it (save stations offer other slots), nothing was loaded. The
+        // Minecraft world goes along with the play; the old slot keeps a copy.
+        const bool saved_into =
+            slot != save_slot && !save_slot.empty() && !fresh &&
+            save_slot_gregory.Get() != nullptr && save_slot_gregory.Get() == live_character();
+
+        if (slot != save_slot || fresh)
+        {
+            RC::Output::send<RC::LogLevel::Default>(
+                STR("SBMP saves: the save is {}{}\n"),
+                slot,
+                fresh ? STR(" (New Game)") : saved_into ? STR(" (saved into it from the one before)") : STR("")
+            );
+        }
+
+        save_slot = slot;
+        save_slot_sent_tick = now;
+
+        if (auto* gregory = live_character())
+        {
+            save_slot_gregory = gregory;
+        }
+
+        for (std::size_t at = 0; at < slot.size() && at < 120; at += 12)
+        {
+            std::int32_t words[3]{};
+
+            for (std::size_t i = 0; i < 12 && at + i < slot.size(); ++i)
+            {
+                const wchar_t c = slot[at + i];
+
+                words[i / 4] |= static_cast<std::int32_t>((c < 128 ? c : L'_') & 0xFF) << ((i % 4) * 8);
+            }
+
+            g_link.push_input(skycraft::proto::kInSaveSlotText, 0, words[0], words[1], words[2]);
+        }
+
+        g_link.push_input(skycraft::proto::kInSaveSlot, 0, fresh ? 1 : saved_into ? 2 : 0);
     }
 
     // Easter egg: an end portal ends the game the Minecraft way. Minecraft
@@ -6741,7 +7566,13 @@ public:
                     set_movement_mode(target, kMoveFalling);
                 }
 
-                // Gregory out of Freddy again (the game's own way, without the animation).
+                // Gregory out of Freddy again (the game's own way, without the animation),
+                // unless the game has taken over (its scene keeps him in Freddy).
+                if (gregory_inside && back_after_game)
+                {
+                    gregory_inside = false;
+                }
+
                 if (gregory_inside && target != nullptr)
                 {
                     gregory_inside = false;
@@ -6790,6 +7621,7 @@ public:
 
                 gregory_ref = gregory;
                 gregory_inside = true;
+                gregory_inside_tick = ::GetTickCount64();
                 target->ProcessEvent(hide, &params);
             }
 
@@ -6798,7 +7630,7 @@ public:
                 gregory_inside ? STR("is inside Freddy now (to the game)") : STR("couldn't be put inside Freddy")
             );
 
-            set_movement_mode(target, kMoveFlying);
+            set_movement_mode(target, kMoveWalking);
 
             // How far above Freddy's feet Minecraft seats its rider: measured
             // once, while he still stands where the mule was put.
@@ -6822,7 +7654,63 @@ public:
             );
         }
 
-        move_actor(actor, mc_to_sb_x(mc.x), mc_to_sb_z(mc.z), mc_to_sb_y(mc.y) - seat_height + half);
+        // Freddy walks the game's way (its gravity, floors and walls; no
+        // mule's jump), steered by the rider's keys towards where he looks,
+        // and Minecraft's mule is put where he is (wish of 15 Oct: the mule
+        // fell through floors Minecraft didn't know yet, and jumped).
+        {
+            const bool typing = (mc.flags & skycraft::proto::kMcScreenOpen) != 0;
+            const bool focused = ::GetForegroundWindow() == overlay::state().window.load(std::memory_order_relaxed);
+            const auto down = [](int key) { return (::GetAsyncKeyState(key) & 0x8000) != 0; };
+            double forward = 0.0;
+            double right = 0.0;
+
+            // The game walks him or holds him (a scene): its turn, not the rider's.
+            bool games_hold = false;
+
+            if (auto* controller = find_controller())
+            {
+                call_getter(controller, STR("IsMoveInputIgnored"), games_hold);
+            }
+
+            if (focused && !typing && !games_hold)
+            {
+                forward = (down('W') ? 1.0 : 0.0) - (down('S') ? 1.0 : 0.0);
+                right = (down('D') ? 1.0 : 0.0) - (down('A') ? 1.0 : 0.0);
+            }
+
+            const double radians = yaw * (3.14159265358979323846 / 180.0);
+            const double dx = std::cos(radians) * forward - std::sin(radians) * right;
+            const double dy = std::sin(radians) * forward + std::cos(radians) * right;
+            const double length = std::sqrt(dx * dx + dy * dy);
+
+            if (length > 1.0e-3)
+            {
+                if (auto* add = target->GetFunctionByNameInChain(STR("AddMovementInput")))
+                {
+                    // (FVector WorldDirection, float ScaleValue, bool bForce): not forced,
+                    // so the game's own hold on him wins.
+                    struct
+                    {
+                        float WorldDirection[3];
+                        float ScaleValue;
+                        bool bForce;
+                    } params{ { static_cast<float>(dx / length), static_cast<float>(dy / length), 0.0f }, 1.0f, false };
+
+                    target->ProcessEvent(add, &params);
+                }
+            }
+
+            const auto at = actor->K2_GetActorLocation();
+
+            g_link.push_input(
+                skycraft::proto::kInRidePos,
+                0,
+                static_cast<std::int32_t>(sb_to_mc_x(at.X()) * 100.0),
+                static_cast<std::int32_t>(sb_to_mc_y(at.Z() - half) * 100.0),
+                static_cast<std::int32_t>(sb_to_mc_z(at.Y()) * 100.0)
+            );
+        }
 
         // He faces where the rider looks.
         struct
@@ -6845,6 +7733,9 @@ public:
     {
         call_with(target, STR("SetActorHiddenInGame"), true);
         call_with(target, STR("SetActorEnableCollision"), false);
+
+        // Minecraft walks through it now, not a few seconds later at the next scan.
+        collision::invalidate(sb_to_mc_x(x), sb_to_mc_y(z), sb_to_mc_z(y), 4.0);
 
         if (in_bucket)
         {
@@ -7073,6 +7964,12 @@ public:
         }
 
         call_with(target, STR("SetActorEnableCollision"), true);
+
+        {
+            const auto back_at = reinterpret_cast<RC::Unreal::AActor*>(target)->K2_GetActorLocation();
+
+            collision::invalidate(sb_to_mc_x(back_at.X()), sb_to_mc_y(back_at.Z()), sb_to_mc_z(back_at.Y()), 4.0);
+        }
         call_with(target, STR("SetActorHiddenInGame"), false);
 
         g_link.push_input(skycraft::proto::kInUseToken, static_cast<std::uint16_t>(id));
@@ -8042,12 +8939,111 @@ public:
         }
     }
 
+    // Freddy's own camera (his CameraComponent) for F5 while riding him: put
+    // back where it was each tick (so it follows his head), then moved along
+    // its own forward direction by Minecraft's camera distance. The second
+    // F5 view looks back at him. Its place is restored afterwards.
+    auto freddy_camera(bool wanted, const skycraft::proto::McState& mc) -> void
+    {
+        auto* camera = freddy_cam.Get();
+
+        if (camera == nullptr && wanted)
+        {
+            static auto* camera_class = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UClass*>(
+                nullptr, nullptr, STR("/Script/Engine.CameraComponent"));
+            auto* mount = freddy.Get();
+            auto* get = mount != nullptr ? mount->GetFunctionByNameInChain(STR("GetComponentByClass")) : nullptr;
+
+            if (camera_class != nullptr && get != nullptr)
+            {
+                struct
+                {
+                    RC::Unreal::UClass* ComponentClass;
+                    RC::Unreal::UObject* ReturnValue;
+                } query{ camera_class, nullptr };
+
+                mount->ProcessEvent(get, &query);
+                camera = query.ReturnValue;
+            }
+
+            if (camera == nullptr)
+            {
+                return;
+            }
+
+            auto* location = camera->GetValuePtrByPropertyNameInChain<float>(STR("RelativeLocation"));
+            auto* rotation = camera->GetValuePtrByPropertyNameInChain<float>(STR("RelativeRotation"));
+
+            if (location == nullptr || rotation == nullptr)
+            {
+                return;
+            }
+
+            std::memcpy(freddy_cam_location, location, sizeof(freddy_cam_location));
+            std::memcpy(freddy_cam_rotation, rotation, sizeof(freddy_cam_rotation));
+            freddy_cam = camera;
+
+            RC::Output::send<RC::LogLevel::Default>(STR("SBMP third person: in Freddy, his camera moves ({})\n"), camera->GetFullName());
+        }
+
+        if (camera == nullptr)
+        {
+            return;
+        }
+
+        // Back in his head first: from there it follows him.
+        set_relative(camera, STR("K2_SetRelativeLocation"), freddy_cam_location[0], freddy_cam_location[1], freddy_cam_location[2]);
+        set_relative(camera, STR("K2_SetRelativeRotation"), freddy_cam_rotation[0], freddy_cam_rotation[1], freddy_cam_rotation[2]);
+
+        if (!wanted)
+        {
+            freddy_cam = RC::Unreal::FWeakObjectPtr{};
+            return;
+        }
+
+        struct Vector
+        {
+            float x, y, z;
+        };
+
+        Vector at{};
+        Vector forward{};
+        Vector turn{};
+
+        if (!call_getter(camera, STR("K2_GetComponentLocation"), at) || !call_getter(camera, STR("GetForwardVector"), forward) ||
+            !call_getter(camera, STR("K2_GetComponentRotation"), turn))
+        {
+            return;
+        }
+
+        const float distance = (std::max)(mc.cameraDistance, 0.5f) * static_cast<float>(skycraft::proto::kUnitsPerBlock);
+        const float side = mc.cameraMode == 2 ? 1.0f : -1.0f;
+
+        set_relative(camera, STR("K2_SetWorldLocation"), at.x + forward.x * distance * side, at.y + forward.y * distance * side, at.z + forward.z * distance * side + 20.0f);
+
+        if (mc.cameraMode == 2)
+        {
+            // FRotator: pitch, yaw, roll. Facing back at him.
+            set_relative(camera, STR("K2_SetWorldRotation"), -turn.x, turn.y + 180.0f, turn.z);
+        }
+    }
+
     // F5: Minecraft's camera sits behind its player. Unreal's camera manager
     // has a mode for that ("FreeCam": behind whoever is being viewed, at a
     // distance, pulled in by walls), so it is switched to that rather than
     // moving Gregory's own camera, which he puts back every frame.
     auto update_third_person(RC::Unreal::UObject* controller, bool wanted, const skycraft::proto::McState& mc, double actor_z) -> void
     {
+        // In Freddy the game looks through Freddy's own camera, which the free
+        // camera mode doesn't move (F5 left it in his head, 15 Oct): that camera
+        // itself is moved behind his head (or in front, facing him).
+        freddy_camera(gregory_inside && wanted, mc);
+
+        if (gregory_inside)
+        {
+            wanted = false;
+        }
+
         auto* manager = controller->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(STR("PlayerCameraManager"));
 
         if (manager == nullptr || *manager == nullptr)

@@ -53,6 +53,24 @@ public final class SkyCollision {
 	private SkyCollision() {
 	}
 
+	/** True if the host's geometry (its voxel shapes) reaches into the box. */
+	public static boolean gameBlocks(net.minecraft.world.phys.AABB box) {
+		if (SHAPES.isEmpty()) {
+			return false;
+		}
+		var test = net.minecraft.world.phys.shapes.Shapes.create(box);
+		for (BlockPos pos : BlockPos.betweenClosed(
+			(int) Math.floor(box.minX), (int) Math.floor(box.minY), (int) Math.floor(box.minZ),
+			(int) Math.floor(box.maxX - 1.0E-7), (int) Math.floor(box.maxY - 1.0E-7), (int) Math.floor(box.maxZ - 1.0E-7))) {
+			VoxelShape shape = SHAPES.get(pos.asLong());
+			if (shape != null && !shape.isEmpty() && net.minecraft.world.phys.shapes.Shapes.joinIsNotEmpty(
+				shape.move(pos.getX(), pos.getY(), pos.getZ()), test, net.minecraft.world.phys.shapes.BooleanOp.AND)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	public static @Nullable VoxelShape shapeAt(BlockPos pos) {
 		return SHAPES.isEmpty() ? null : SHAPES.get(pos.asLong());
 	}
@@ -133,7 +151,7 @@ public final class SkyCollision {
 		for (int rx = rx0; rx <= rx1; rx++) {
 			for (int ry = ry0; ry <= ry1; ry++) {
 				for (int rz = rz0; rz <= rz1; rz++) {
-					if (!KNOWN_REGIONS.contains(regionKey(rx, ry, rz))) {
+					if (!known(regionKey(rx, ry, rz))) {
 						return false;
 					}
 				}
@@ -142,8 +160,26 @@ public final class SkyCollision {
 		return true;
 	}
 
+	/** Regions the host may be changing (a part of its map came in), until when. */
+	private static final ConcurrentHashMap<Long, Long> FORGOTTEN = new ConcurrentHashMap<>();
+
+	private static boolean known(long key) {
+		if (!KNOWN_REGIONS.contains(key)) {
+			return false;
+		}
+		Long until = FORGOTTEN.get(key);
+		if (until == null) {
+			return true;
+		}
+		if (System.currentTimeMillis() >= until) {
+			FORGOTTEN.remove(key);
+			return true;
+		}
+		return false;
+	}
+
 	public static boolean isKnown(int x, int y, int z) {
-		return KNOWN_REGIONS.contains(regionKey(Math.floorDiv(x, REGION_SIZE), Math.floorDiv(y, REGION_SIZE), Math.floorDiv(z, REGION_SIZE)));
+		return known(regionKey(Math.floorDiv(x, REGION_SIZE), Math.floorDiv(y, REGION_SIZE), Math.floorDiv(z, REGION_SIZE)));
 	}
 
 	/** True if any Skyrim geometry exists in the 3x3 column below (x, y, z), down to {@code depth} blocks. */
@@ -204,6 +240,29 @@ public final class SkyCollision {
 	/** Skyrim is describing its world around the player (false in a plain Minecraft world). */
 	public static boolean active() {
 		return !KNOWN_REGIONS.isEmpty();
+	}
+
+	/** The host's map changed around here: these regions count as unknown until it sends them again. */
+	public static void forget(double x, double y, double z, double radius) {
+		int r0x = Math.floorDiv((int) Math.floor(x - radius), REGION_SIZE), r1x = Math.floorDiv((int) Math.floor(x + radius), REGION_SIZE);
+		int r0y = Math.floorDiv((int) Math.floor(y - radius), REGION_SIZE), r1y = Math.floorDiv((int) Math.floor(y + radius), REGION_SIZE);
+		int r0z = Math.floorDiv((int) Math.floor(z - radius), REGION_SIZE), r1z = Math.floorDiv((int) Math.floor(z + radius), REGION_SIZE);
+		int forgotten = 0;
+		// Only for a moment: a region the host finds unchanged isn't sent again, and one
+		// forgotten for good held Steve back for minutes (15 Oct).
+		long until = System.currentTimeMillis() + 1500;
+		for (int rx = r0x; rx <= r1x; rx++) {
+			for (int ry = r0y; ry <= r1y; ry++) {
+				for (int rz = r0z; rz <= r1z; rz++) {
+					long key = regionKey(rx, ry, rz);
+					if (KNOWN_REGIONS.contains(key)) {
+						FORGOTTEN.put(key, until);
+						forgotten++;
+					}
+				}
+			}
+		}
+		SkyCraft.LOG.info("FNAFSBCraft: the game loaded part of its map; {} regions wait for a new scan", forgotten);
 	}
 
 	private static long regionKey(int rx, int ry, int rz) {
@@ -344,6 +403,7 @@ public final class SkyCollision {
 			for (int ry = Math.floorDiv(minY, REGION_SIZE); ry <= Math.floorDiv(maxY, REGION_SIZE); ry++) {
 				for (int rz = Math.floorDiv(minZ, REGION_SIZE); rz <= Math.floorDiv(maxZ, REGION_SIZE); rz++) {
 					KNOWN_REGIONS.add(regionKey(rx, ry, rz));
+					FORGOTTEN.remove(regionKey(rx, ry, rz));
 				}
 			}
 		}

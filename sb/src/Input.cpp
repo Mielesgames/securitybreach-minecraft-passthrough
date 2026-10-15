@@ -162,6 +162,13 @@ namespace input
                     return true;
                 }
 
+                // Tab is the game's Fazwatch (Minecraft's player list means
+                // nothing in a world of one).
+                if (!g_screen_open && wparam == VK_TAB)
+                {
+                    return false;
+                }
+
                 // Held keys only repeat where it matters: typing in a screen.
                 if (!repeat || g_screen_open)
                 {

@@ -107,6 +107,8 @@ namespace skycraft::proto
 		kMcHoldsSword = 1u << 11,  // a sword in the main hand: in creative it breaks nothing
 		kMcHoldsFlipTag = 1u << 12,  // a name tag named Dinnerbone or Grumm in the main hand
 		kMcDoorsLocked = 1u << 13,   // gamerule allow_opening_doors is off
+		kMcRiding = 1u << 27,       // sits in or on something (a boat, a minecart, a mule): carried, not falling
+		kMcSlotReady = 1u << 26,    // Minecraft has the world of the Security Breach save the host last named open
 		kMcAllowCheating = 1u << 25, // gamerule allow_cheating: the game's "you can't use this now" is ignored
 		kMcHoldsJebTag = 1u << 24,   // a name tag called jeb_ in the main hand: right-click makes a host character rainbow
 		kMcPauseMenu = 1u << 23,     // Security Breach's pause menu in Minecraft's style is open: the host pauses the game
@@ -203,6 +205,10 @@ namespace skycraft::proto
 		kInSwing = 9,        // swing the main hand (the player used something in the host game)
 		kInTokenName = 11,   // part of a broken object's name: code = token id, a, b, c = 12 characters (latin-1, 0 = end)
 		kInDropToken = 12,   // drop the paper for a broken object: code = token id, a, b, c = where (Minecraft x 100)
+		kInSaveSlotText = 28,    // part of the loaded save's name: 12 characters in a, b, c
+		kInSaveSlot = 29,        // the save's name is complete; a = 1: it was just started with New Game, 2: the game was saved into it from the save before (same play)
+		kInForgetRegions = 31,   // the game streamed a big part of the map in: what is known within code blocks of a, b, c (Minecraft x 100) is unknown until scanned again
+		kInRidePos = 30,         // Steve rides Freddy and Freddy walks the game's way: his feet at a, b, c (Minecraft x 100); the mule goes there
 		kInEnderPuff = 27,       // a host character teleported like an enderman: its sound and purple particles at a, b, c
 		                         // (Minecraft x 100; sent for where it went from and where it went to)
 		kInAward = 26,           // a trick happened on the host's side: award advancement `code` (1 = rainbow)
@@ -226,7 +232,7 @@ namespace skycraft::proto
 		                     // (code = token, named by kInTokenName). Using it puts the character back.
 		kInHide = 15,        // code 1: the host player is in a hiding spot at a, b, c (Minecraft x 100): sit the player
 		                     // on an unseen seat there. code 0: out of it again, the seat goes.
-		kInMountFreddy = 14, // the player used Freddy: onto his mule, which stands at a, b, c (Minecraft x 100)
+		kInMountFreddy = 14, // the player used Freddy: onto his mule, which stands at a, b, c (Minecraft x 100); code 1: off it again
 		kInUseToken = 13,    // that object was put back: code = token id; one paper of it in the hand is used up
 		kInBreakEffect = 10, // something in the host game broke: block-break particles and sound at
 		                     // a, b, c (Minecraft coordinates x 100), two blocks tall

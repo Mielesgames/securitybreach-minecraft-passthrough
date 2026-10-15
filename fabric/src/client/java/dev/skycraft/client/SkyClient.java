@@ -331,6 +331,43 @@ public final class SkyClient {
 	 * ground with its own physics and ours is pinned to it. While Minecraft drives, the host sends
 	 * its collision and everything is Minecraft's normal physics: nothing to do here.
 	 */
+	/**
+	 * Sneaking into a gap too low to sneak through (a vent) crawls, like Minecraft does under a
+	 * trapdoor: Shift held, the game's geometry in the way of a crouching body half a block ahead
+	 * but not of a crawling one. Once crawling it stays so until there is room to stand up. Flying
+	 * never crawls.
+	 */
+	private static int crawlRoomTicks;
+
+	private static void crawlIntoVents(LocalPlayer player) {
+		boolean was = dev.skycraft.SkyCraft.crawling;
+		boolean now = false;
+		if (!player.getAbilities().flying && !player.isPassenger() && !player.isSpectator()) {
+			var feet = player.position();
+			var crouch = player.getDimensions(net.minecraft.world.entity.Pose.CROUCHING);
+			var crawl = player.getDimensions(net.minecraft.world.entity.Pose.SWIMMING);
+			var look = net.minecraft.world.phys.Vec3.directionFromRotation(0.0F, player.getYRot()).scale(0.5);
+			var ahead = feet.add(look);
+			boolean shift = player.isShiftKeyDown();
+			var standHere = player.getDimensions(net.minecraft.world.entity.Pose.STANDING).makeBoundingBox(feet).deflate(0.05);
+			// Crawling ends only with room to stand up (known geometry, half a second of it),
+			// Shift or not: getting up into a vent's ceiling or its entrance blocker
+			// (MOD_VentTransitionBlocker, at head height) put Steve on top of the vent (15 Oct).
+			boolean roomToStand = SkyCollision.isKnown(standHere.inflate(0.5)) && !SkyCollision.gameBlocks(standHere);
+			crawlRoomTicks = roomToStand ? crawlRoomTicks + 1 : 0;
+			if (shift && !was) {
+				now = SkyCollision.gameBlocks(crouch.makeBoundingBox(ahead).deflate(0.05))
+					&& !SkyCollision.gameBlocks(crawl.makeBoundingBox(ahead).deflate(0.05));
+			} else if (was) {
+				now = crawlRoomTicks < 10;
+			}
+		}
+		if (now != was) {
+			dev.skycraft.SkyCraft.crawling = now;
+			dev.skycraft.SkyCraft.LOG.info("FNAFSBCraft: {} crawling", now ? "started" : "stopped");
+		}
+	}
+
 	private static void passthroughPhysics(Minecraft minecraft) {
 		LocalPlayer player = minecraft.player;
 		if (!PASSTHROUGH || !linked || player == null) {
@@ -345,6 +382,7 @@ public final class SkyClient {
 			}
 		}
 		reportRedstone(minecraft, player);
+		crawlIntoVents(player);
 		footsteps(minecraft, player);
 		SecurityBreachAchievements.tick(minecraft);
 		showFreddyPreview(minecraft, player);
@@ -622,6 +660,9 @@ public final class SkyClient {
 			if (dev.skycraft.combat.FreddyMount.isFreddy(player.getVehicle())) {
 				flags |= Proto.MC_RIDING_HOST;
 			}
+			if (player.getVehicle() != null) {
+				flags |= Proto.MC_RIDING;
+			}
 			if (player.getVehicle() instanceof net.minecraft.world.entity.decoration.ArmorStand) {
 				flags |= Proto.MC_HIDING;
 			}
@@ -636,6 +677,9 @@ public final class SkyClient {
 			}
 			if (player.isBlocking()) {
 				flags |= Proto.MC_BLOCKING;
+			}
+			if (MirrorWorld.slotReady(minecraft)) {
+				flags |= Proto.MC_SLOT_READY;
 			}
 			if (minecraft.gui.screen() instanceof SecurityBreachMenu || minecraft.gui.screen() instanceof EndingScreen) {
 				flags |= Proto.MC_PAUSE_MENU;

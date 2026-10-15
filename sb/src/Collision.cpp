@@ -240,6 +240,60 @@ namespace collision
             std::memcpy(trace.params.data() + trace.actors_to_ignore, &array, sizeof(array));
         }
 
+        // A door of the game that stands open. Its invisible player blockers
+        // (PlayerCollision_Single/Double, Door_Collision) only go some time
+        // after it opened, and Minecraft kept them as an invisible wall in the
+        // doorway (15 Oct). An open door is left out of the scan altogether:
+        // its panels are in the frame by then.
+    }
+
+    bool is_door(RC::Unreal::UObject* actor)
+    {
+        static std::unordered_map<RC::Unreal::UClass*, bool> by_class;
+
+        if (actor == nullptr)
+        {
+            return false;
+        }
+
+        auto* actor_class = actor->GetClassPrivate();
+        const auto known = by_class.find(actor_class);
+
+        if (known != by_class.end())
+        {
+            return known->second;
+        }
+
+        const bool door = actor->GetFunctionByNameInChain(STR("ForceDoorOpen")) != nullptr;
+
+        by_class[actor_class] = door;
+
+        return door;
+    }
+
+    bool is_open_door(RC::Unreal::UObject* actor)
+    {
+        if (actor == nullptr)
+        {
+            return false;
+        }
+
+        auto* is_open = actor->GetFunctionByNameInChain(STR("IsDoorOpen"));
+
+        if (is_open == nullptr || actor->GetFunctionByNameInChain(STR("ForceDoorOpen")) == nullptr)
+        {
+            return false;
+        }
+
+        alignas(16) std::uint8_t result[16]{};
+
+        actor->ProcessEvent(is_open, result);
+
+        return result[0] != 0;
+    }
+
+    namespace
+    {
         // Freddy, the animatronics, the bots: things that walk around. They
         // must not end up in Minecraft as walls that stay where they stood.
         bool is_pawn(RC::Unreal::UObject* actor)
@@ -322,10 +376,13 @@ namespace collision
                     return false;
                 }
 
-                // Hit a character: look again without it, there may be a wall behind.
+                // Hit a character or a door: look again without it, there may be a wall behind.
+                // Doors aren't Minecraft's to know at all: whether Steve gets through one is
+                // the game's say at that moment (the wall check in dllmain traces it), not a
+                // scan that lags behind the door (the Chica chase, 15 Oct).
                 auto* actor = hit_actor(g_box);
 
-                if (actor == nullptr || walker_count == 4 || g_box.actors_to_ignore < 0 || !is_pawn(actor))
+                if (actor == nullptr || walker_count == 4 || g_box.actors_to_ignore < 0 || !(is_pawn(actor) || is_door(actor)))
                 {
                     return true;
                 }

@@ -35,6 +35,14 @@ namespace collision
         double* impact = nullptr
     );
 
+    // True for a door of the game that stands open (its invisible player
+    // blockers linger after it opened; walking through them is fine).
+    bool is_open_door(RC::Unreal::UObject* actor);
+
+    // True for any door of the game (left out of Minecraft's collision; the
+    // wall check asks the game about it instead).
+    bool is_door(RC::Unreal::UObject* actor);
+
     // What a ray you can see along hits first (the game's visibility
     // channel): finds buttons and other things a pawn can walk through.
     // `thickness` > 0 sweeps a box of that half size, for small things that

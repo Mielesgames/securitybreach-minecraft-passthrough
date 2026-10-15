@@ -21,6 +21,7 @@ public final class SkyCraft implements ModInitializer {
 	private static final String KIT3_TAG = "skycraft_pizzaplex_kit";
 	private static final String KIT4_TAG = "skycraft_iron_pickaxe";
 	private static final String GUIDE_TAG = "skycraft_guide";
+	private static final String SNEAKERS_TAG = "skycraft_sneakers";
 
 	/** Security Breach: Steve may open (and redstone may open) the game's doors. */
 	public static final net.minecraft.world.level.gamerules.GameRule<Boolean> ALLOW_OPENING_DOORS =
@@ -70,6 +71,9 @@ public final class SkyCraft implements ModInitializer {
 		net.fabricmc.fabric.api.gamerule.v1.GameRuleBuilder.forBoolean(false)
 			.category(net.minecraft.world.level.gamerules.GameRuleCategory.PLAYER)
 			.buildAndRegister(net.minecraft.resources.Identifier.withDefaultNamespace("allow_cheating"));
+
+	/** Security Breach: the player crawls (sneaking into a vent); both sides keep the pose. */
+	public static volatile boolean crawling;
 
 	/** Set by the end portal (server thread); the client opens the ending when it sees it. */
 	public static volatile boolean endingRequested;
@@ -406,16 +410,30 @@ public final class SkyCraft implements ModInitializer {
 				handler.getPlayer().removeTag(KIT2_TAG);
 				handler.getPlayer().removeTag(KIT3_TAG);
 				handler.getPlayer().removeTag(GUIDE_TAG);
+				handler.getPlayer().removeTag(SNEAKERS_TAG);
 				LOG.info("FNAFSBCraft: {} spawned with nothing, the kits are given again", handler.getPlayer().getName().getString());
 			}
 			giveStarterKit(handler.getPlayer());
 			giveBuilderKit(handler.getPlayer());
 			givePizzaplexKit(handler.getPlayer());
-			// Once per player, also in worlds from before: the guide (first: trapdoors for the vents).
+			giveSneakers(handler.getPlayer());
+			// Once per player, also in worlds from before: the guide (first: crawling into the vents).
 			if (dev.skycraft.world.SkyDig.PASSTHROUGH && !handler.getPlayer().entityTags().contains(GUIDE_TAG)) {
 				handler.getPlayer().getInventory().add(SkyLoot.guide());
 				handler.getPlayer().addTag(GUIDE_TAG);
 				LOG.info("FNAFSBCraft: gave {} the guide", handler.getPlayer().getName().getString());
+			} else if (dev.skycraft.world.SkyDig.PASSTHROUGH) {
+				// A guide from before keeps up with what's new (Shift for the vents, 15 Oct).
+				var inventory = handler.getPlayer().getInventory();
+				var fresh = SkyLoot.guide();
+				for (int i = 0; i < inventory.getContainerSize(); i++) {
+					var book = inventory.getItem(i).get(net.minecraft.core.component.DataComponents.WRITTEN_BOOK_CONTENT);
+					if (book != null && book.title().raw().equals(fresh.get(net.minecraft.core.component.DataComponents.WRITTEN_BOOK_CONTENT).title().raw())
+						&& !book.equals(fresh.get(net.minecraft.core.component.DataComponents.WRITTEN_BOOK_CONTENT))) {
+						inventory.setItem(i, fresh.copy());
+						LOG.info("FNAFSBCraft: {}'s guide brought up to date", handler.getPlayer().getName().getString());
+					}
+				}
 			}
 			server.execute(() -> fixPizzaplexKit(joined));
 			dressTestGuest(handler.getPlayer());
@@ -634,6 +652,38 @@ public final class SkyCraft implements ModInitializer {
 		inventory.add(new ItemStack(VOID_FILLER));
 		player.addTag(KIT3_TAG);
 		LOG.info("FNAFSBCraft: gave Pizzaplex kit to {}", player.getName().getString());
+	}
+
+	/**
+	 * Gregory runs faster than Steve: sneakers that make up for it, 30% faster on foot. Once per
+	 * player, also in worlds from before (wish of 15 Oct).
+	 */
+	private static void giveSneakers(ServerPlayer player) {
+		if (!dev.skycraft.world.SkyDig.PASSTHROUGH || player.entityTags().contains(SNEAKERS_TAG)) {
+			return;
+		}
+		var boots = new ItemStack(Items.LEATHER_BOOTS);
+		boots.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME, net.minecraft.network.chat.Component.literal("Gregory's Sneakers"));
+		boots.set(net.minecraft.core.component.DataComponents.DYED_COLOR, new net.minecraft.world.item.component.DyedItemColor(0xE4E4EC));
+		boots.set(net.minecraft.core.component.DataComponents.UNBREAKABLE, net.minecraft.util.Unit.INSTANCE);
+		boots.set(net.minecraft.core.component.DataComponents.ATTRIBUTE_MODIFIERS, net.minecraft.world.item.component.ItemAttributeModifiers.builder()
+			.add(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED,
+				new net.minecraft.world.entity.ai.attributes.AttributeModifier(net.minecraft.resources.Identifier.fromNamespaceAndPath(MOD_ID, "sneakers_speed"), 0.3,
+					net.minecraft.world.entity.ai.attributes.AttributeModifier.Operation.ADD_MULTIPLIED_BASE),
+				net.minecraft.world.entity.EquipmentSlotGroup.FEET)
+			.add(net.minecraft.world.entity.ai.attributes.Attributes.ARMOR,
+				new net.minecraft.world.entity.ai.attributes.AttributeModifier(net.minecraft.resources.Identifier.fromNamespaceAndPath(MOD_ID, "sneakers_armor"), 1.0,
+					net.minecraft.world.entity.ai.attributes.AttributeModifier.Operation.ADD_VALUE),
+				net.minecraft.world.entity.EquipmentSlotGroup.FEET)
+			.build());
+		// On the feet when they are free, otherwise in the inventory.
+		if (player.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.FEET).isEmpty()) {
+			player.setItemSlot(net.minecraft.world.entity.EquipmentSlot.FEET, boots);
+		} else {
+			player.getInventory().add(boots);
+		}
+		player.addTag(SNEAKERS_TAG);
+		LOG.info("FNAFSBCraft: gave {} Gregory's Sneakers", player.getName().getString());
 	}
 
 	/** Security Breach's pickaxe: iron with Unbreaking III (diamond mined the building too fast). */

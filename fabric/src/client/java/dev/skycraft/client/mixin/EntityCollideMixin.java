@@ -20,6 +20,14 @@ public abstract class EntityCollideMixin {
 	private void skycraft$smoothSkyrimCollision(Vec3 movement, CallbackInfoReturnable<Vec3> cir) {
 		if ((Object) this instanceof LocalPlayer player && SkyClient.linked() && !player.noPhysics) {
 			cir.setReturnValue(SkyCollider.collide(player, cir.getReturnValue()));
+			return;
+		}
+		// What the player rides (Freddy's mule) is moved by this client too: it waits at the edge
+		// of what is known as well, or it fell through floors that weren't there yet (15 Oct).
+		Entity self = (Entity) (Object) this;
+		var local = net.minecraft.client.Minecraft.getInstance().player;
+		if (local != null && local.getVehicle() == self && self.level().isClientSide() && SkyClient.linked()) {
+			cir.setReturnValue(SkyCollider.vehicleIntoKnown(self, cir.getReturnValue()));
 		}
 	}
 }

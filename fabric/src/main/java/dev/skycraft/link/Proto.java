@@ -59,6 +59,10 @@ public final class Proto {
 	public static final int IN_LOOT_CHEST = 25;
 	public static final int IN_AWARD = 26;
 	public static final int IN_ENDER_PUFF = 27;
+	public static final int IN_SAVE_SLOT_TEXT = 28;
+	public static final int IN_SAVE_SLOT = 29;
+	public static final int IN_RIDE_POS = 30;
+	public static final int IN_FORGET_REGIONS = 31;
 	public static final int HURT_MELEE = 0;
 	public static final int HURT_PROJECTILE = 1;
 	public static final int HURT_MAGIC = 2;
@@ -243,6 +247,8 @@ public final class Proto {
 	public static final int MC_PAUSE_MENU = 1 << 23;
 	public static final int MC_HOLDS_JEB_TAG = 1 << 24;
 	public static final int MC_ALLOW_CHEATING = 1 << 25;
+	public static final int MC_SLOT_READY = 1 << 26;
+	public static final int MC_RIDING = 1 << 27;
 
 	// Overlay
 	public static final long OC_STATE = 0x00;

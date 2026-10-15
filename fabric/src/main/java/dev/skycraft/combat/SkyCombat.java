@@ -70,6 +70,24 @@ public final class SkyCombat {
 		return PROXIES.get(formId);
 	}
 
+	/**
+	 * Security Breach moves the player back onto Gregory now and then (a fall, a wall): Minecraft
+	 * kept him in the boat or minecart he sat in, far away, and steered it from there (15 Oct).
+	 * Out of any vehicle that is more than four blocks off.
+	 */
+	private static void leaveFarVehicles(List<ServerPlayer> players) {
+		if (!dev.skycraft.world.SkyDig.PASSTHROUGH) {
+			return;
+		}
+		for (ServerPlayer player : players) {
+			var vehicle = player.getVehicle();
+			if (vehicle != null && player.distanceToSqr(vehicle) > 16.0) {
+				player.stopRiding();
+				SkyCraft.LOG.info("FNAFSBCraft: {} was put elsewhere, out of the {} far away", player.getName().getString(), vehicle.getType().toShortString());
+			}
+		}
+	}
+
 	/** Tag on a mob the mod keeps from falling (kept with the mob, so a saved one gets gravity back). */
 	private static final String FLOATING_TAG = "skycraft_floating";
 
@@ -122,6 +140,7 @@ public final class SkyCombat {
 		survivalOnly(level);
 		anvilsFall(level);
 		holdInUnknown(level);
+		leaveFarVehicles(players);
 		// Hits land during the tick (melee, sweeps, arrows, fire); send one combined hit per actor.
 		for (SkyrimActorEntity proxy : PROXIES.values()) {
 			float[] hit = proxy.takeHit();

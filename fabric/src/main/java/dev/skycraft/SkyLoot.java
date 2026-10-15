@@ -169,12 +169,12 @@ public final class SkyLoot {
 
 	/**
 	 * The book every player gets once: how to get going as Steve in the Pizzaplex, starting with
-	 * the first vent (a trapdoor makes Steve crawl, and the vent is too low to walk).
+	 * the first vent (Shift in front of it makes Steve crawl, and the vent is too low to walk).
 	 */
 	public static ItemStack guide() {
 		var book = new ItemStack(Items.WRITTEN_BOOK);
 		String[] texts = {
-			"Welcome to the Pizzaplex, Steve!\n\nYou are too tall for the vents. Place a trapdoor in front of you, open it, and walk into it: you crawl, and you fit.",
+			"Welcome to the Pizzaplex, Steve!\n\nYou are too tall for the vents. Hold Shift in front of one and walk in: you crawl, and you fit.\n\n(A trapdoor works too, like anywhere in Minecraft.)",
 			"F6 switches between Steve and Gregory.\n\nRight-click doors and switches to use them, as Gregory would.\n\nEscape opens the menu, with your advancements.",
 			"The animatronics hear your steps. Sneak to be quiet, and wear a carved pumpkin so they see you less far.\n\nLook out for chests in rooms you haven't been to.",
 			"Commands:\n/tp atrium\n/freddy\n/summon chica\n/repairworld\n/experiment\n\nHave fun!",

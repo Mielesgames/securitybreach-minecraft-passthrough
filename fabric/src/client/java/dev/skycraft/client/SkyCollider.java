@@ -45,6 +45,11 @@ public final class SkyCollider {
 	 * floor that wasn't there yet (15 Oct). Like waiting for a chunk to load, the player doesn't
 	 * go where nothing is known yet: each direction that would is held back until it arrives.
 	 */
+	/** For what the player rides: the same wait at the edge of what is known. */
+	public static Vec3 vehicleIntoKnown(net.minecraft.world.entity.Entity vehicle, Vec3 move) {
+		return intoKnown(vehicle.getBoundingBox(), move);
+	}
+
 	private static Vec3 intoKnown(AABB box, Vec3 move) {
 		if (!SkyClient.passthrough() || !SkyCollision.active() || SkyCollision.isKnown(box.move(move))) {
 			return move;

@@ -201,6 +201,35 @@ public final class InputBridge {
 					});
 				}
 			}
+			case Proto.IN_FORGET_REGIONS -> dev.skycraft.world.SkyCollision.forget(a / 100.0, b / 100.0, c / 100.0, code);
+			case Proto.IN_RIDE_POS -> {
+				// Freddy walks the game's way: his mule (and Steve on it) is put where he is.
+				var player = minecraft.player;
+				var mule = player != null ? player.getVehicle() : null;
+				if (mule != null && dev.skycraft.combat.FreddyMount.isFreddy(mule)) {
+					mule.setPos(a / 100.0, b / 100.0, c / 100.0);
+					mule.setDeltaMovement(net.minecraft.world.phys.Vec3.ZERO);
+					mule.resetFallDistance();
+				}
+			}
+			case Proto.IN_SAVE_SLOT_TEXT -> {
+				for (int word : new int[] { a, b, c }) {
+					for (int i = 0; i < 4; i++) {
+						int ch = (word >>> (i * 8)) & 0xFF;
+						if (ch != 0) {
+							SAVE_SLOT.append((char) ch);
+						}
+					}
+				}
+			}
+			case Proto.IN_SAVE_SLOT -> {
+				// The Security Breach save that is loaded: its own Minecraft world.
+				String save = SAVE_SLOT.toString();
+				SAVE_SLOT.setLength(0);
+				if (!save.isEmpty()) {
+					MirrorWorld.hostSave(minecraft, save, a);
+				}
+			}
 			case Proto.IN_CHAT_TEXT -> {
 				var text = CHAT_LINES.computeIfAbsent(code, k -> new StringBuilder());
 				for (int word : new int[] { a, b, c }) {
@@ -237,9 +266,19 @@ public final class InputBridge {
 				}
 			}
 			case Proto.IN_MOUNT_FREDDY -> {
-				// The player used Freddy in the host game: onto his mule.
+				// The player used Freddy in the host game: onto his mule. Code 1: the game took
+				// Gregory out of Freddy, so off the mule.
 				var server = minecraft.getSingleplayerServer();
-				if (server != null && minecraft.player != null) {
+				if (code == 1 && server != null && minecraft.player != null) {
+					var uuid = minecraft.player.getUUID();
+					server.execute(() -> {
+						var player = server.getPlayerList().getPlayer(uuid);
+						if (player != null && player.getVehicle() != null) {
+							player.stopRiding();
+							dev.skycraft.SkyCraft.LOG.info("FNAFSBCraft: the game took Gregory out of Freddy, off the mule");
+						}
+					});
+				} else if (server != null && minecraft.player != null) {
 					var uuid = minecraft.player.getUUID();
 					double x = a / 100.0, y = b / 100.0, z = c / 100.0;
 					server.execute(() -> {
@@ -304,6 +343,7 @@ public final class InputBridge {
 	}
 
 	private static final java.util.Map<Integer, StringBuilder> TOKEN_NAMES = new java.util.HashMap<>();
+	private static final StringBuilder SAVE_SLOT = new StringBuilder();
 	private static final java.util.Map<Integer, StringBuilder> CHAT_LINES = new java.util.HashMap<>();
 
 	/** Skyrim hit the player: apply it as Minecraft damage on the integrated server (or the host's). */
